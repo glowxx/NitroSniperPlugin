@@ -46,7 +46,7 @@ export function buildMessage(event) {
 }
 
 export class NotificationService {
-    constructor({ database = 'bot/data/notifications.sqlite', sendDM, now = Date.now }) {
+    constructor({ database = 'bot/data/notifications.sqlite', sendDM, now = Date.now, onLeaseLost = () => {} }) {
         if (database !== ':memory:') mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
         this.db = new DatabaseSync(database);
         this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
@@ -57,25 +57,65 @@ export class NotificationService {
                 PRIMARY KEY(user_id,event_id));
             CREATE INDEX IF NOT EXISTS delivery_due ON events(state,next_at);
             CREATE INDEX IF NOT EXISTS ingestion_recent ON events(user_id,created_at);
-            CREATE INDEX IF NOT EXISTS status_latest ON events(user_id,updated_at DESC);`);
+            CREATE INDEX IF NOT EXISTS status_latest ON events(user_id,updated_at DESC);
+            CREATE TABLE IF NOT EXISTS worker_lease(id INTEGER PRIMARY KEY CHECK(id=1),owner TEXT NOT NULL,expires_at INTEGER NOT NULL);`);
+        this.owner = randomBytes(24).toString('hex');
+        const acquired = this.db.prepare(`INSERT INTO worker_lease VALUES(1,?,?)
+            ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at
+            WHERE worker_lease.expires_at<=?`).run(this.owner, Date.now() + 60_000, Date.now());
+        if (!acquired.changes) {
+            this.db.close();
+            throw new Error('Another notification bot owns this database. Stop it, or wait up to 60 seconds after a crash.');
+        }
+        this.onLeaseLost = onLeaseLost;
+        this.leaseTimer = setInterval(() => {
+            try {
+                const renewed = this.db.prepare('UPDATE worker_lease SET expires_at=? WHERE id=1 AND owner=?').run(Date.now() + 60_000, this.owner);
+                if (!renewed.changes) this.loseLease();
+            } catch { this.loseLease(); }
+        }, 5000);
+        this.leaseTimer.unref();
         this.sendDM = sendDM;
         this.now = now;
         this.busy = false;
         this.closed = false;
         this.lastPrune = 0;
     }
-    link(userId) {
-        if (!snowflake.test(userId)) throw new ServiceError(400, 'Invalid account.');
-        const token = randomBytes(32).toString('base64url');
+    loseLease() {
+        if (this.stopping || this.closed) return;
+        this.stopping = true;
+        this.onLeaseLost();
+    }
+    ownsLease() {
+        return !this.closed && this.db.prepare('SELECT owner FROM worker_lease WHERE id=1').get()?.owner === this.owner;
+    }
+    ensureOwner() {
+        if (this.closed || this.stopping) throw new ServiceError(503, 'Notification bot is stopping.');
+        if (!this.ownsLease()) { this.loseLease(); throw new ServiceError(503, 'Notification database ownership changed.'); }
+    }
+    prepareLink(userId) {
+        this.ensureOwner();
+        if (typeof userId !== 'string' || !snowflake.test(userId)) throw new ServiceError(400, 'Invalid account.');
+        return randomBytes(32).toString('base64url');
+    }
+    activateLink(userId, token) {
+        this.ensureOwner();
+        if (typeof userId !== 'string' || !snowflake.test(userId) || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new ServiceError(400, 'Invalid link.');
         this.db.prepare('INSERT INTO links VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,linked_at=excluded.linked_at')
             .run(userId, hash(token), this.now());
+    }
+    link(userId) {
+        const token = this.prepareLink(userId);
+        this.activateLink(userId, token);
         return token;
     }
     disconnect(userId) {
+        this.ensureOwner();
         this.db.prepare('DELETE FROM links WHERE user_id=?').run(userId);
         this.db.prepare("UPDATE events SET state='cancelled',error='Disconnected',updated_at=? WHERE user_id=? AND state='queued'").run(this.now(), userId);
     }
     authenticate(token, userId) {
+        this.ensureOwner();
         if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new ServiceError(401, 'Run /notifications link and paste the new key in the plugin.');
         const link = this.db.prepare('SELECT user_id FROM links WHERE token_hash=?').get(hash(token));
         if (!link) throw new ServiceError(401, 'Notification key expired or revoked. Run /notifications link again.');
@@ -95,6 +135,7 @@ export class NotificationService {
     }
     // Internal use only, after a verified Discord interaction. Not exposed by HTTP.
     enqueueForUser(body) {
+        this.ensureOwner();
         const event = validateEvent(body, this.now());
         if (!this.status(event.discordUserId).linked) throw new ServiceError(403, 'Run /notifications link first.');
         const existing = this.db.prepare('SELECT state FROM events WHERE user_id=? AND event_id=?').get(event.discordUserId, event.eventId);
@@ -109,7 +150,8 @@ export class NotificationService {
         return { accepted: true, duplicate: false, state: 'queued' };
     }
     async deliverDue() {
-        if (this.busy || this.closed) return;
+        if (this.busy || this.closed || this.stopping) return;
+        if (!this.ownsLease()) { this.loseLease(); return; }
         this.busy = true;
         try {
             const now = this.now();
@@ -121,16 +163,30 @@ export class NotificationService {
             const events = this.db.prepare("SELECT * FROM events WHERE state='queued' AND next_at<=? ORDER BY next_at LIMIT 20").all(now);
             for (const row of events) {
                 if (this.closed) break;
-                if (!this.status(row.user_id).linked) continue;
+                const canSend = () => !this.closed && !this.stopping && this.ownsLease() && this.status(row.user_id).linked
+                    && this.db.prepare('SELECT state FROM events WHERE user_id=? AND event_id=?').get(row.user_id, row.event_id)?.state === 'queued';
+                if (!canSend()) continue;
+                const payload = JSON.parse(row.payload);
+                if (this.now() - Date.parse(payload.occurredAt) >= DAY) {
+                    this.db.prepare("UPDATE events SET state='failed',error='Delivery window expired',updated_at=? WHERE user_id=? AND event_id=? AND state='queued'")
+                        .run(this.now(), row.user_id, row.event_id);
+                    continue;
+                }
                 let state = 'delivered', error = null, nextAt = now;
-                try { await this.sendDM(row.user_id, buildMessage(JSON.parse(row.payload))); }
+                try {
+                    if (await this.sendDM(row.user_id, buildMessage(payload), canSend) === false) continue;
+                }
                 catch (err) {
-                    const permanent = [50007, 50278, 50013, 10013, 50035].includes(Number(err.code));
+                    const permanent = [50007, 50278, 50013, 10013, 50035].includes(Number(err?.code));
                     state = permanent || row.attempts >= 11 ? 'failed' : 'queued';
-                    error = [50007, 50278].includes(Number(err.code)) ? 'Discord cannot deliver this DM. Allow DMs, unblock the bot, then send a new test.'
+                    error = [50007, 50278].includes(Number(err?.code)) ? 'Discord cannot deliver this DM. Allow DMs, unblock the bot, then send a new test.'
                         : permanent ? 'Discord rejected this notification. Check the account and bot permissions.'
                         : row.attempts >= 11 ? 'Delivery failed after repeated attempts. Check the bot and send a new test.'
                         : 'Discord delivery temporarily unavailable.';
+                    if ([50007, 50278, 10013].includes(Number(err?.code))) {
+                        this.db.prepare("UPDATE events SET state='failed',error=?,updated_at=? WHERE user_id=? AND state='queued'")
+                            .run(error, this.now(), row.user_id);
+                    }
                     nextAt = this.now() + Math.min(300_000, 5000 * 2 ** Math.min(row.attempts, 6));
                 }
                 // A disconnect during an in-flight request must not resurrect cancelled jobs.
@@ -139,7 +195,14 @@ export class NotificationService {
             }
         } finally { this.busy = false; }
     }
-    close() { this.closed = true; if (this.busy) throw new Error('Wait for the delivery worker before closing the database.'); this.db.close(); }
+    stop() { this.stopping = true; }
+    close() {
+        if (this.busy) throw new Error('Wait for the delivery worker before closing the database.');
+        if (this.closed) return;
+        clearInterval(this.leaseTimer);
+        try { this.db.prepare('DELETE FROM worker_lease WHERE id=1 AND owner=?').run(this.owner); }
+        finally { this.closed = true; this.db.close(); }
+    }
 }
 
 export function createApi(service, { ready = () => true } = {}) {
@@ -159,7 +222,7 @@ export function createApi(service, { ready = () => true } = {}) {
                 return reply(200, service.status(userId));
             }
             if (req.method !== 'POST' || url.pathname !== '/v1/events') return reply(404, { error: 'Unknown route.' });
-            if (!req.headers['content-type']?.startsWith('application/json')) throw new ServiceError(415, 'Use application/json.');
+            if (req.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json') throw new ServiceError(415, 'Use application/json.');
             // Validate credentials before reading attacker-controlled bodies.
             if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)
                 || !service.db.prepare('SELECT 1 FROM links WHERE token_hash=?').get(hash(token))) throw new ServiceError(401, 'Invalid notification key.');

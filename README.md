@@ -26,7 +26,7 @@ The key can send notifications only to the Discord account that created it. **Ne
 
 ### For the bot operator
 
-Requires **Node.js 22.13+**; Node.js 24 is recommended. SQLite is built into Node (older releases may print an experimental warning). Run the bot on your server, separately from the client plugin. One bot process must own its database; do not run multiple replicas against the same file.
+Requires **Node.js 22.13+**; Node.js 24 is recommended. SQLite is built into Node (older releases may print an experimental warning). Run the bot on your server, separately from the client plugin. One bot process must own its database. An ownership lease rejects a second process and stops a worker that loses ownership; after a crash, wait up to 60 seconds for that lease to expire. Do not run multiple replicas against the same file.
 
 1. Create a bot in the [Discord Developer Portal](https://discord.com/developers/applications). Copy its bot token and application ID.
 2. Invite it with the **`bot`** and **`applications.commands`** scopes. No administrator permission, Message Content intent or Server Members intent is needed.
@@ -70,16 +70,17 @@ Build a desktop Vencord or Equicord from source following its custom-plugin inst
 
 **Rebuild and fully restart the client after updating.** The new native helper must be included. No bot library is imported into the renderer or native plugin. Web-only installations cannot use these notification transports; settings show a clear error.
 
-Existing webhook settings remain valid. Webhooks are now restricted to official Discord webhook URLs and requests have a 10-second timeout. A notification error never causes another redemption attempt.
+Existing webhook settings remain valid. Webhooks are now restricted to official Discord webhook URLs and requests have a 10-second timeout. Valid thread_id routing is preserved. Channel webhooks are best-effort and do not share the durable DM retry queue. A notification error never causes another redemption attempt.
 
 ## Delivery and claim behaviour
 
-- Gift codes are deduplicated for 24 hours in the current client process (up to 5,000 remembered codes); pending redemption queue is capped at 100.
-- Multiple links in a message are handled separately. Own messages can be ignored; old/invalid timestamps are rejected.
+- Gift codes are deduplicated per account for 24 hours in the current client process (up to 5,000 remembered codes); pending redemption queue is capped at 100. Discarded, never-dispatched codes are released on stop.
+- Multiple links in a message are handled separately. Own messages are ignored by default on fresh installations (existing explicit settings are retained); old/invalid timestamps are rejected.
 - Synchronous errors and rejected action promises release the queue. Repeated callbacks are ignored. Disabling the plugin cancels queued work and suppresses stale callbacks.
-- After two minutes without a callback, a warning asks you to check Discord's dialog. The next claim waits for the callback; the plugin does not bypass CAPTCHA or assume the result. Restarting can clear a stuck queue, but does not cancel a redemption already dispatched to Discord.
-- The local DM outbox is saved in the client's DataStore before transport, isolated by account, endpoint and key fingerprint, and capped at 100 events. Events expire after 24 hours. Old key/account outboxes stay isolated until expiration; they never get reassigned to a different account.
-- The bot stores hashed keys and a durable SQLite queue, deduplicates by account/event ID, and retries transient failures with bounded exponential backoff. Event history is retained for seven days. A closed/blocked DM is terminal and appears in the status; enable DMs and send a **new test** after fixing it.
+- After two minutes without a callback, a warning asks you to check Discord's dialog. The next claim waits for the callback; the plugin does not bypass CAPTCHA or assume the result. Plugin toggles retain the lock on an unresolved dispatched action. Fully restart the Discord client if it never returns; a plugin toggle does not cancel a redemption already dispatched to Discord.
+- A confirmed event is saved before optional metadata enrichment. The local DM outbox uses committed DataStore snapshots before transport, isolated by account, endpoint and key fingerprint, and capped at 100 events. Events expire after 24 hours. Old key/account outboxes stay isolated until expiration; they never get reassigned to a different account.
+- Outbox read/schema failures pause notifications without overwriting unread data; write failures do not publish unsaved events.
+- The bot stores hashed keys and a durable SQLite queue, deduplicates by account/event ID, and retries transient failures with bounded exponential backoff. Event history is retained for seven days. A closed/blocked DM is terminal and appears in the status; enable DMs and send a **new test** after fixing it. The existing blocked-account backlog is failed to prevent repeated rejected requests.
 - Per-account ingestion is limited to 10 new events per minute, with 100 queued per account and 10,000 total. Duplicate retries are accepted without consuming the ingestion limit.
 - HTTP **202 means saved/queued**, not delivered. Check Connection or `/notifications status` reports the actual bot delivery state.
 - Delivery is at least once. Stable Discord message nonces reduce duplicates if a process crashes after sending but before marking an event delivered; Discord's nonce window is limited, so an unusually delayed retry can still duplicate a DM.
@@ -92,7 +93,7 @@ npm test
 npm run check
 ```
 
-Tests cover the full confirmed-claim → native IPC → HTTP → SQLite → DM-sender path with a simulated Discord sender, plus duplicate callbacks, restarts, account isolation, stopped plugins, queued retries, blocked DMs, revoked keys, malformed requests, URL restrictions, rate limits and response-size bounds. GitHub Actions runs them on Node.js 22 and 24.
+Tests cover the full confirmed-claim → native IPC → HTTP → SQLite → DM-sender path with a simulated Discord sender, plus fault-injected reads/writes, restart overlap, cancelled pairing, ownership leases, Markdown-link injection, duplicate callbacks, restarts, account isolation, stopped plugins, queued retries, blocked DMs, revoked keys, malformed requests, URL restrictions, rate limits and response-size bounds. GitHub Actions runs them on Node.js 22 and 24.
 
 Host verification commands after copying the root plugin files into an upstream source checkout:
 
@@ -101,7 +102,7 @@ pnpm testTsc
 pnpm buildStandalone
 ```
 
-See [TESTING.md](TESTING.md) for the actual verification results and the remaining live-client checks.
+See [AUDIT.md](AUDIT.md) for structural findings and remaining boundaries, and [TESTING.md](TESTING.md) for the actual verification results and the remaining live-client checks.
 
 ## Credits and license
 

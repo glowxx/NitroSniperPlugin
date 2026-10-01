@@ -33,7 +33,13 @@ export function parseDiscordWebhook(value: string): URL | null {
         || !/^\/api(?:\/v\d+)?\/webhooks\/\d{17,20}\/[A-Za-z0-9_-]+$/.test(url.pathname)) {
         throw new Error("Enter an official Discord webhook URL.");
     }
-    url.search = "";
+    const threadIds = url.searchParams.getAll("thread_id");
+    const waits = url.searchParams.getAll("wait");
+    if (threadIds.length > 1 || (threadIds.length === 1 && !/^\d{17,20}$/.test(threadIds[0]))
+        || waits.length > 1 || (waits.length === 1 && !["true", "false"].includes(waits[0]))
+        || Array.from(url.searchParams.keys()).some(key => !["thread_id", "wait"].includes(key))) {
+        throw new Error("Webhook query parameters are invalid. Only thread_id and wait are supported.");
+    }
     url.hash = "";
     return url;
 }

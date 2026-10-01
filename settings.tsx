@@ -57,7 +57,7 @@ export const settings = definePluginSettings({
     ignoreOwnGiftLinks: {
         type: OptionType.BOOLEAN,
         description: "Do not redeem Nitro gift links from messages sent by you.",
-        default: false
+        default: true
     },
     webhookUrl: {
         type: OptionType.STRING,

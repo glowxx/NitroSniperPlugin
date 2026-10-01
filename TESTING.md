@@ -2,8 +2,8 @@
 
 | Check | Result |
 | --- | --- |
-| Automated regression/integration tests, Node 24.19.0 | 25 passed |
-| Same tests, minimum supported Node 22.13.0 | 25 passed |
+| Automated regression/integration tests, Node 24.19.0 | 54 passed |
+| Same tests, minimum supported Node 22.13.0 | 54 passed |
 | Local plugin bundles and bot syntax | Passed |
 | Vencord TypeScript check and full desktop standalone build | Passed |
 | Equicord TypeScript check and full desktop/Equibop standalone build | Passed |
@@ -16,6 +16,8 @@ Host sources checked:
 - Equicord: `ab9b98472acb281cc7ec4d2c7a612219993bb3cb`
 
 The plugin retains the original MIT license and attribution rather than inserting Vencord's copyright header. Both host builds include the renderer and new native notification transport. GitHub Actions repeats tests on Node 22/24 and builds against these pinned host revisions.
+
+The follow-up structural audit and fault-injection results are in [AUDIT.md](AUDIT.md).
 
 ## Problems corrected
 

@@ -104,3 +104,20 @@ test('exhausted delivery attempts fail visibly instead of retrying forever', asy
     service.db.prepare('UPDATE events SET attempts=11').run(); await service.deliverDue();
     assert.equal(service.status(user).latest.state, 'failed'); assert.match(service.status(user).latest.error, /repeated attempts/); service.close();
 });
+
+test('a second bot process cannot share the same database and duplicate delivery', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nitrosniper-lease-')); const database = join(dir, 'state.sqlite');
+    const first = setup(async () => {}, database); const key = first.link(user); first.enqueue(event(), key);
+    assert.throws(() => setup(async () => {}, database), /Another notification bot/);
+    first.close(); let sent = 0; const replacement = setup(async () => { sent++; }, database);
+    await replacement.deliverDue(); assert.equal(sent, 1); replacement.close(); rmSync(dir, { recursive: true });
+});
+test('a worker losing its database lease stops sending and cannot delete the replacement lease', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nitrosniper-lease-')); const database = join(dir, 'state.sqlite'); let sent = 0;
+    const first = setup(async () => { sent++; }, database); first.enqueue(event(), first.link(user));
+    first.db.prepare('UPDATE worker_lease SET expires_at=0').run();
+    const replacement = setup(async () => { sent++; }, database);
+    await first.deliverDue(); assert.equal(sent, 0); assert.equal(first.stopping, true);
+    first.close(); assert.equal(replacement.ownsLease(), true);
+    await replacement.deliverDue(); assert.equal(sent, 1); replacement.close(); rmSync(dir, { recursive: true });
+});

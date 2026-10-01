@@ -60,3 +60,14 @@ test('queue is bounded under bursts', () => {
     queue.start(); for (let i = 0; i < 101; i++) assert.equal(queue.enqueue({ code: String(i) }), true);
     assert.equal(queue.enqueue({ code: 'overflow' }), false); queue.stop();
 });
+
+test('gift extraction never truncates URL path suffixes or attacker-controlled code separators', () => {
+    for (const suffix of ['_extra', '-extra', '@evil.com', '/extra', '=x']) assert.deepEqual(extractGiftCodes(`https://discord.gift/${code}${suffix}`), []);
+    assert.deepEqual(extractGiftCodes(`(https://discord.gift/${code})`), [code]);
+});
+
+test('thread webhook routing is preserved and unsupported query parameters are rejected', () => {
+    const base = 'https://discord.com/api/webhooks/123456789012345678/abc_123';
+    assert.equal(parseDiscordWebhook(base + '?thread_id=234567890123456789&wait=false').searchParams.get('thread_id'), '234567890123456789');
+    for (const query of ['?thread_id=wrong', '?thread_id=234567890123456789&thread_id=345678901234567890', '?unknown=x']) assert.throws(() => parseDiscordWebhook(base + query));
+});

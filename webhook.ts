@@ -25,7 +25,7 @@ const WEBHOOK_NAME = "NitroSniper";
 
 function getNative() {
     const native = (globalThis as any).VencordNative?.pluginHelpers?.NitroSniper as PluginNative<typeof import("./native")> | undefined;
-    if (!native) {
+    if (!native?.sendWebhook) {
         throw new Error("Webhook sending requires desktop native support.");
     }
 
@@ -53,7 +53,7 @@ function buildMessageUrl(request: ClaimRequest) {
 }
 
 function escapeMarkdown(value: string) {
-    return value.replace(/([\\`*_{}[\\]()#+.!|>~-])/g, "\\$1");
+    return value.replace(/[\\`*_{}[\]()#+.!|>~-]/g, "\\$&");
 }
 
 function buildGiftTypeField(giftType: string | null): WebhookField | null {
@@ -61,13 +61,13 @@ function buildGiftTypeField(giftType: string | null): WebhookField | null {
 
     return {
         name: "Gift Type:",
-        value: escapeMarkdown(giftType),
+        value: escapeMarkdown(giftType.slice(0, 200)),
         inline: false
     };
 }
 
 function buildAuthorField(request: ClaimRequest): WebhookField | null {
-    const label = request.authorName ?? request.authorUsername ?? request.authorId;
+    const label = (request.authorName ?? request.authorUsername ?? request.authorId)?.slice(0, 128);
     if (!label) return null;
 
     const profileUrl = buildUserProfileUrl(request.authorId);
@@ -118,7 +118,7 @@ function buildEmbedAuthor(request: ClaimRequest) {
     if (!name) return undefined;
 
     return {
-        name,
+        name: name.slice(0, 256),
         icon_url: request.authorAvatarUrl
     };
 }

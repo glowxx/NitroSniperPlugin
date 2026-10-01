@@ -13,7 +13,7 @@ const { default: plugin } = await loadTS('index.tsx', {
     '@webpack/common': 'export const ChannelStore={getChannel:()=>undefined}; export const UserStore={getCurrentUser:()=>({id:globalThis.nsPlugin.user})}; export const showToast=()=>{}; export const Toasts={Type:{FAILURE:1}};',
     './settings': 'export const settings = {store:{webhookUrl:"", botNotificationsEnabled:true,botServiceUrl:"",botNotificationKey:"",ignoreOwnGiftLinks:true}};',
     './giftCode': 'export async function resolveGiftType(){return "Nitro"}',
-    './notifications': 'export const digest=async()=>"a".repeat(64); export async function enqueueNotification(e){globalThis.nsPlugin.events.push(e)} export async function startNotifications(){} export function stopNotifications(){}',
+    './notifications': 'export const captureNotificationConfig=()=>null; export const digest=async()=>"a".repeat(64); export async function enqueueNotification(e){globalThis.nsPlugin.events.push(e)} export async function startNotifications(){} export function stopNotifications(){}',
     './webhook': 'export async function sendClaimWebhook(){}'
 });
 function message(content, extra = {}) { return { content, timestamp: new Date(Date.now() + 1).toISOString(), author: { id: '234567890123456789', username: 'sender' }, channel_id: '345678901234567890', id: '456789012345678901', ...extra }; }
