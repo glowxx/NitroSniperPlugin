@@ -10,7 +10,12 @@ import { Constants, RestAPI } from "@webpack/common";
 
 import type { GiftCodeResolution } from "./types";
 
+let activeLookups = 0;
+const MAX_LOOKUPS = 4;
+
 export async function resolveGiftType(code: string): Promise<string | null> {
+    if (activeLookups >= MAX_LOOKUPS) return null;
+    activeLookups++;
     try {
         const response: { body: GiftCodeResolution; } = await RestAPI.get({
             url: Constants.Endpoints.GIFT_CODE_RESOLVE(code),
@@ -21,8 +26,9 @@ export async function resolveGiftType(code: string): Promise<string | null> {
             oldFormErrors: true
         });
 
-        return response.body.subscription_plan?.name ?? response.body.store_listing?.sku?.name ?? null;
+        const name = response.body?.subscription_plan?.name ?? response.body?.store_listing?.sku?.name;
+        return typeof name === "string" ? name.slice(0, 200) || null : null;
     } catch {
         return null;
-    }
+    } finally { activeLookups--; }
 }

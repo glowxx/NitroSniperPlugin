@@ -22,3 +22,7 @@ pnpm-debug.log*
 # IDEs
 .vscode/
 .idea/
+
+# Private notification service state
+bot/data/
+coverage/
