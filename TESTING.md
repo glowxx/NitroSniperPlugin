@@ -8,6 +8,7 @@
 | Vencord TypeScript check and full desktop standalone build | Passed |
 | Equicord TypeScript check and full desktop/Equibop standalone build | Passed |
 | Vencord plugin lint, excluding upstream's own copyright-header rule | Passed |
+| GitHub Actions run | Not started: GitHub account billing lock |
 
 Host sources checked:
 
@@ -42,3 +43,7 @@ No Discord bot credentials or authenticated desktop Discord instance were availa
 5. Restart the bot during queued delivery, switch client accounts, and test the deployed HTTPS proxy.
 
 The internal Discord action is discovered by name at runtime; future Discord updates can change it even when TypeScript and bundling pass. A successful mock integration does not prove live Discord compatibility or real delivery. DM delivery also depends on the recipient's privacy settings and bot access. See README for limits and recovery actions.
+
+## GitHub Actions availability
+
+The workflow was created and triggered, but GitHub rejected all jobs before assigning a runner. Its check annotation states: "The job was not started because your account is locked due to a billing issue." No CI test steps ran. This is separate from the passing local test/build results above. The repository owner must resolve the GitHub billing lock before the workflow can run.
