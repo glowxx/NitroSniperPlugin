@@ -8,6 +8,7 @@ https://github.com/neoarz/NitroSniper
 
 import type { PluginNative } from "@utils/types";
 
+import { parseDiscordWebhook } from "./notificationProtocol";
 import type {
     ClaimRequest,
     WebhookEmbed,
@@ -21,16 +22,6 @@ const FAILURE_COLOR = 0xf04747;
 const TEST_COLOR = 0x5865f2;
 const WEBHOOK_NAME = "NitroSniper";
 
-function parseWebhookUrl(webhookUrl: string) {
-    const trimmed = webhookUrl.trim();
-    if (!trimmed) return null;
-
-    try {
-        return new URL(trimmed);
-    } catch {
-        throw new Error("Webhook URL is invalid.");
-    }
-}
 
 function getNative() {
     const native = (globalThis as any).VencordNative?.pluginHelpers?.NitroSniper as PluginNative<typeof import("./native")> | undefined;
@@ -203,14 +194,14 @@ export async function sendClaimWebhook(
     request: ClaimRequest,
     giftType: string | null
 ) {
-    const url = parseWebhookUrl(webhookUrl);
+    const url = parseDiscordWebhook(webhookUrl);
     if (!url) return;
 
     await postWebhook(url, buildClaimWebhookPayload(result, request, giftType));
 }
 
 export async function sendTestWebhook(webhookUrl: string) {
-    const url = parseWebhookUrl(webhookUrl);
+    const url = parseDiscordWebhook(webhookUrl);
     if (!url) {
         throw new Error("Webhook URL is empty.");
     }

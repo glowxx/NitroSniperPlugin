@@ -7,6 +7,7 @@ https://github.com/neoarz/NitroSniper
 */
 
 export interface ClaimRequest {
+    claimantId?: string;
     code: string;
     authorId?: string;
     authorName?: string;

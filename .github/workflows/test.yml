@@ -1,0 +1,50 @@
+name: Notifications tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run check
+  host-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - repository: Vendicated/Vencord
+            ref: 7f0c10cc29fd789f2f4828ae3dc947623e837920
+          - repository: Equicord/Equicord
+            ref: ab9b98472acb281cc7ec4d2c7a612219993bb3cb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.ref }}
+          path: client
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: |
+          corepack enable
+          mkdir -p client/src/userplugins/nitroSniper
+          cp *.ts *.tsx client/src/userplugins/nitroSniper/
+      - run: corepack pnpm@11.9.0 install --frozen-lockfile
+        working-directory: client
+      - run: corepack pnpm@11.9.0 testTsc
+        working-directory: client
+      - run: corepack pnpm@11.9.0 buildStandalone
+        working-directory: client
