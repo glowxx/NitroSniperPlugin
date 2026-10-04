@@ -1,0 +1,17 @@
+services:
+  notifications:
+    build:
+      context: ..
+      dockerfile: bot/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      DATABASE_PATH: /app/bot/data/notifications.sqlite
+    ports:
+      - '127.0.0.1:8787:8787'
+    volumes:
+      - notifications:/app/bot/data
+volumes:
+  notifications:

@@ -1,0 +1,14 @@
+{
+  "name": "nitrosniper-notifications",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "bot": "node --env-file=bot/.env bot/index.mjs",
+    "bot:register": "node --env-file=bot/.env bot/register.mjs"
+  },
+  "dependencies": { "discord.js": "^14.25.1" },
+  "devDependencies": { "esbuild": "^0.25.12" }
+}

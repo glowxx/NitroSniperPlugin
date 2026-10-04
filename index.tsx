@@ -8,141 +8,117 @@ https://github.com/neoarz/NitroSniper
 
 import { Logger } from "@utils/Logger";
 import definePlugin from "@utils/types";
-import { Message } from "@vencord/discord-types";
+import type { Message } from "@vencord/discord-types";
 import { findByPropsLazy } from "@webpack";
-import { UserStore } from "@webpack/common";
+import { ChannelStore, showToast, Toasts, UserStore } from "@webpack/common";
 
+import { ClaimQueue, extractGiftCodes } from "./claimQueue";
 import { resolveGiftType } from "./giftCode";
+import { createNotification } from "./notificationProtocol";
+import { captureNotificationConfig, digest, enqueueNotification, startNotifications, stopNotifications } from "./notifications";
 import { settings } from "./settings";
-import type { ClaimRequest, WebhookResult } from "./types";
+import type { ClaimRequest } from "./types";
 import { sendClaimWebhook } from "./webhook";
-
-const GIFT_LINK_REGEX = /(?:discord\.gift\/|discord\.com\/gifts?\/)([a-zA-Z0-9]{16,24})/;
 
 const logger = new Logger("NitroSniper");
 const GiftActions = findByPropsLazy("redeemGiftCode");
-
 let startTime = 0;
-let claiming = false;
-const claimQueue: ClaimRequest[] = [];
+let session = 0;
+let started = false;
+let accountId = "";
+let lastOverflowWarning = 0;
 
-function resetState() {
+async function giftTypeWithDeadline(code: string) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([resolveGiftType(code), new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 3000); })]);
+    } finally { clearTimeout(timer); }
+}
+
+async function notify(request: ClaimRequest, success: boolean, userId: string, generation: number) {
+    const { webhookUrl, botNotificationsEnabled: botEnabled } = settings.store;
+    if (!webhookUrl.trim() && !(success && botEnabled)) return;
+    const isCurrent = () => started && generation === session && UserStore.getCurrentUser()?.id === userId;
+    if (!isCurrent()) return;
+    const expectedConfig = captureNotificationConfig();
+    const giftType = giftTypeWithDeadline(request.code);
+    if (webhookUrl.trim()) void giftType.then(type => {
+        if (!isCurrent() || settings.store.webhookUrl !== webhookUrl) return;
+        return sendClaimWebhook(webhookUrl, success ? "claimed" : "failed", request, type);
+    }).catch(() => logger.error("Webhook notification failed. Check the webhook URL and desktop native support."));
+    if (success && botEnabled) {
+        const event = createNotification(request, userId, null);
+        event.eventId = await digest(`${userId}:${request.code}`);
+        if (!isCurrent()) return;
+        await enqueueNotification(event, expectedConfig, giftType);
+    }
+}
+
+const queue = new ClaimQueue(
+    (request, onRedeemed, onError) => {
+        if (request.claimantId !== UserStore.getCurrentUser()?.id) return onError(new Error("Discord account changed."));
+        return GiftActions.redeemGiftCode({ code: request.code, onRedeemed, onError });
+    },
+    (request, success) => {
+        logger.log(success ? "Gift successfully redeemed" : "Gift redemption failed");
+        const userId = request.claimantId;
+        if (userId) void notify(request, success, userId, session)
+            .catch(() => logger.error("Could not save DM notification. Check the notification settings and outbox."));
+    },
+    () => showToast("NitroSniper is still waiting for Discord. Check for an open gift or CAPTCHA dialog. If Discord never responds, fully restart the client.", Toasts.Type.FAILURE)
+);
+
+function startSession() {
+    started = true;
+    session++;
+    accountId = UserStore.getCurrentUser()?.id ?? "";
     startTime = Date.now();
-    claimQueue.length = 0;
-    claiming = false;
-}
-
-function toError(error: unknown) {
-    return error instanceof Error ? error : new Error(String(error));
-}
-
-function isOwnMessage(message: Message) {
-    return message.author?.id === UserStore.getCurrentUser()?.id;
-}
-
-function shouldSkipMessage(message: Message) {
-    return settings.store.ignoreOwnGiftLinks && isOwnMessage(message);
-}
-
-function isMessageOlderThanStart(message: Message) {
-    return new Date(message.timestamp).getTime() < startTime;
-}
-
-function extractGiftCode(content: string) {
-    return content.match(GIFT_LINK_REGEX)?.[1] ?? null;
-}
-
-function createClaimRequest(message: Message): ClaimRequest | null {
-    const code = message.content ? extractGiftCode(message.content) : null;
-    if (!code) return null;
-
-    const authorId = message.author?.id;
-    const authorAvatar = message.author?.avatar;
-
-    return {
-        code,
-        authorId,
-        authorName: message.author?.globalName ?? message.author?.username,
-        authorUsername: message.author?.username,
-        authorAvatarUrl: authorId && authorAvatar
-            ? `https://cdn.discordapp.com/avatars/${authorId}/${authorAvatar}.png?size=128`
-            : undefined,
-        channelId: message.channel_id,
-        guildId: message.guild_id,
-        messageId: message.id
-    };
-}
-
-function notifyClaim(result: WebhookResult, request: ClaimRequest, giftType: string | null) {
-    void sendClaimWebhook(
-        settings.store.webhookUrl,
-        result,
-        request,
-        giftType
-    ).catch(webhookError => {
-        logger.error("Failed to send NitroSniper webhook notification", webhookError);
-    });
-}
-
-function continueQueue() {
-    claiming = false;
-    processQueue();
-}
-
-function handleClaimSuccess(request: ClaimRequest, giftType: Promise<string | null>) {
-    logger.log(`Successfully redeemed code: ${request.code}`);
-    void giftType.then(type => notifyClaim("claimed", request, type));
-    continueQueue();
-}
-
-function handleClaimFailure(request: ClaimRequest, error: Error, giftType: Promise<string | null>) {
-    logger.error(`Failed to redeem code: ${request.code}`, error);
-    void giftType.then(type => notifyClaim("failed", request, type));
-    continueQueue();
-}
-
-function processQueue() {
-    if (claiming) return;
-
-    const request = claimQueue.shift();
-    if (!request) return;
-
-    claiming = true;
-    const giftType = settings.store.webhookUrl.trim()
-        ? resolveGiftType(request.code)
-        : Promise.resolve(null);
-
-    GiftActions.redeemGiftCode({
-        code: request.code,
-        onRedeemed: () => handleClaimSuccess(request, giftType),
-        onError: (error: unknown) => handleClaimFailure(request, toError(error), giftType)
-    });
+    queue.start();
+    void startNotifications(() => ({ enabled: settings.store.botNotificationsEnabled,
+        url: settings.store.botServiceUrl, key: settings.store.botNotificationKey,
+        userId: UserStore.getCurrentUser()?.id ?? "" }))
+        .catch(() => logger.error("Could not load the DM notification outbox."));
 }
 
 export default definePlugin({
     name: "NitroSniper",
-    description: "Automatically redeems Nitro gift links sent in chat",
-    authors: [{
-        name: "neoarz",
-        id: 218675193592283137n
-    }],
+    description: "Redeems Nitro gift links with optional webhook and bot DM notifications",
+    authors: [{ name: "neoarz", id: 218675193592283137n }],
     tags: ["Chat", "Utility"],
-    searchTerms: ["nitro", "gift", "redeem", "snipe"],
+    searchTerms: ["nitro", "gift", "redeem", "snipe", "notifications"],
     settings,
-
-    start() {
-        resetState();
+    start: startSession,
+    stop() {
+        started = false;
+        session++;
+        queue.stop();
+        stopNotifications();
     },
-
     flux: {
         MESSAGE_CREATE({ message }: { message: Message; }) {
-            if (!message.content || shouldSkipMessage(message) || isMessageOlderThanStart(message)) return;
-
-            const request = createClaimRequest(message);
-            if (!request) return;
-
-            claimQueue.push(request);
-            processQueue();
-        }
+            if (!started || !message.content || !UserStore.getCurrentUser()) return;
+            if (accountId !== UserStore.getCurrentUser()?.id) {
+                startSession();
+                // Account-change handling occurs at receipt time, after this fresh event was created.
+                const receivedTime = new Date(message.timestamp).getTime();
+                if (Number.isFinite(receivedTime) && Date.now() - receivedTime < 5000) startTime = Math.min(startTime, receivedTime);
+            }
+            if (settings.store.ignoreOwnGiftLinks && message.author?.id === UserStore.getCurrentUser()?.id) return;
+            const timestamp = new Date(message.timestamp).getTime();
+            if (!Number.isFinite(timestamp) || timestamp < startTime) return;
+            for (const code of extractGiftCodes(message.content)) {
+                const authorId = message.author?.id;
+                const avatar = message.author?.avatar;
+                if (queue.pendingCount >= 100 && Date.now() - lastOverflowWarning > 10_000) {
+                    lastOverflowWarning = Date.now();
+                    showToast("NitroSniper claim queue is full. Check the open Discord gift dialog.", Toasts.Type.FAILURE);
+                }
+                queue.enqueue({ code, claimantId: accountId, authorId, authorName: message.author?.globalName ?? message.author?.username,
+                    authorUsername: message.author?.username,
+                    authorAvatarUrl: authorId && avatar ? `https://cdn.discordapp.com/avatars/${authorId}/${avatar}.png?size=128` : undefined,
+                    channelId: message.channel_id, guildId: ChannelStore.getChannel(message.channel_id)?.guild_id, messageId: message.id });
+            }
+        },
+        LOGOUT() { accountId = ""; session++; queue.stop(); stopNotifications(); }
     }
 });
