@@ -82,14 +82,24 @@ const queue = new ClaimQueue(
     () => showToast("NitroSniper is still waiting for Discord. Check for an open gift or CAPTCHA dialog. If Discord never responds, fully restart the client.", Toasts.Type.FAILURE)
 );
 
+function directCredentialId(userId: string): string {
+    try { return JSON.parse(settings.store.botDirectAccounts || "{}")[userId]?.credentialId ?? ""; }
+    catch { return ""; }
+}
+
 function startSession() {
+    // Preserve an existing service setup on the first update; fresh installations use token setup.
+    if (settings.store.botNotificationMode === "direct" && !settings.store.botDirectAccounts
+        && settings.store.botServiceUrl.trim() && settings.store.botNotificationKey.trim()) settings.store.botNotificationMode = "service";
     started = true;
     session++;
     accountId = UserStore.getCurrentUser()?.id ?? "";
     startTime = Date.now();
     queue.start();
     void startNotifications(() => ({ enabled: settings.store.botNotificationsEnabled,
-        url: settings.store.botServiceUrl, key: settings.store.botNotificationKey,
+        mode: settings.store.botNotificationMode === "direct" ? "direct" : "service",
+        url: settings.store.botNotificationMode === "direct" ? "https://discord.com" : settings.store.botServiceUrl,
+        key: settings.store.botNotificationMode === "direct" ? directCredentialId(UserStore.getCurrentUser()?.id ?? "") : settings.store.botNotificationKey,
         userId: UserStore.getCurrentUser()?.id ?? "" }))
         .catch(() => logger.error("Could not load the DM notification outbox."));
 }

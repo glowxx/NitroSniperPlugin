@@ -3,7 +3,7 @@ import type { PluginNative } from "@utils/types";
 
 import { type NotificationEvent, parseServiceUrl } from "./notificationProtocol";
 
-export interface NotificationConfig { enabled: boolean; url: string; key: string; userId: string; }
+export interface NotificationConfig { enabled: boolean; url: string; key: string; userId: string; mode?: "direct" | "service"; }
 interface Connection extends NotificationConfig { scope: string; }
 interface Pending { event: NotificationEvent; scope: string; attempts: number; nextAt: number; }
 export interface NotificationStatus { message: string; pending: number; unsaved: number; }
@@ -44,6 +44,17 @@ function native() {
     if (!helper?.sendBotNotification) throw new Error("DM notifications require a desktop build with the updated native.ts. Rebuild and restart your client.");
     return helper;
 }
+async function send(value: NotificationConfig, action: "event" | "status", payload: string) {
+    if (value.mode !== "direct") return native().sendBotNotification(value.url, value.key, action, payload);
+    const helper = native();
+    if (!helper.sendDirectBotNotification) throw new Error("Rebuild and restart Discord to enable bot token setup.");
+    if (action === "status") {
+        const bot = await helper.getDirectBotStatus(value.userId);
+        return { status: bot?.credentialId === value.key ? 200 : 401,
+            data: JSON.stringify(bot?.credentialId === value.key ? { latest: { state: `Connected to ${bot.botName}` } } : { error: "Connect your bot in the notification settings." }) };
+    }
+    return helper.sendDirectBotNotification(value.userId, value.key, payload);
+}
 export function captureNotificationConfig(): NotificationConfig | null {
     return config ? { ...config() } : null;
 }
@@ -52,18 +63,20 @@ function sameSession(generation: number, value?: NotificationConfig) {
     if (!value) return true;
     const current = config();
     try {
-        return current.enabled && current.userId === value.userId && current.key.trim() === value.key.trim()
+        return current.enabled && current.mode === value.mode && current.userId === value.userId && current.key.trim() === value.key.trim()
             && parseServiceUrl(current.url).origin === parseServiceUrl(value.url).origin;
     } catch { return false; }
 }
 async function connection(value = config()): Promise<Connection> {
     if (!value.enabled) throw new Error("Bot DM notifications are disabled.");
     const url = parseServiceUrl(value.url).origin;
-    if (!/^[A-Za-z0-9_-]{43}$/.test(value.key.trim())) throw new Error("Paste the notification key from /notifications link.");
+    if (value.mode === "direct") {
+        if (!/^[a-f0-9-]{36}$/.test(value.key)) throw new Error("Connect your bot in the notification settings.");
+    } else if (!/^[A-Za-z0-9_-]{43}$/.test(value.key.trim())) throw new Error("Paste the notification key from /notifications link.");
     if (!/^\d{17,20}$/.test(value.userId)) throw new Error("Sign in to Discord first.");
-    return { ...value, url, key: value.key.trim(), scope: await digest(`${url}:${value.key.trim()}:${value.userId}`) };
+    return { ...value, url, key: value.key.trim(), scope: await digest(`${value.mode === "direct" ? "direct:" : ""}${url}:${value.key.trim()}:${value.userId}`) };
 }
-function responseBody(data: string): { accepted?: boolean; state?: string; pending?: number; error?: string; latest?: { state?: string; error?: string; }; } {
+function responseBody(data: string): { accepted?: boolean; state?: string; pending?: number; error?: string; retryAfter?: number; latest?: { state?: string; error?: string; }; } {
     try {
         const value = JSON.parse(data);
         return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -192,12 +205,12 @@ async function flush() {
         if (!pending) { update(state.message); return; }
         let status = -1, data = "";
         try {
-            ({ status, data } = await native().sendBotNotification(value.url, value.key, "event", JSON.stringify(pending.event)));
+            ({ status, data } = await send(value, "event", JSON.stringify(pending.event)));
         } catch { /* A rejected IPC request follows the same persisted backoff as a network failure. */ }
         if (!sameSession(generation, value)) return;
         const body = responseBody(data);
         const accepted = status >= 200 && status < 300 && body.accepted === true;
-        const terminal = status >= 400 && status < 500 && ![401, 403, 408, 429].includes(status);
+        const terminal = status >= 400 && status < 500 && !(value.mode === "direct" ? [408, 429] : [401, 403, 408, 429]).includes(status);
         await serial(async () => {
             if (!sameSession(generation, value)) return;
             // Optional enrichment can replace the object while the HTTP request is in flight.
@@ -206,7 +219,7 @@ async function flush() {
             if (accepted || terminal) await commit(queue.filter(item => item !== current));
             else {
                 const attempts = current.attempts + 1;
-                const nextAt = Date.now() + ([401, 403].includes(status) ? 300_000 : status === 429 ? 60_000 : Math.min(300_000, 5000 * 2 ** Math.min(attempts, 6)));
+                const nextAt = Date.now() + ([401, 403].includes(status) ? 300_000 : status === 429 ? (value.mode === "direct" && typeof body.retryAfter === "number" && Number.isFinite(body.retryAfter) ? Math.max(5000, Math.min(DAY, body.retryAfter * 1000)) : 60_000) : Math.min(300_000, 5000 * 2 ** Math.min(attempts, 6)));
                 await commit(queue.map(item => item === current ? { ...current, attempts, nextAt } : item));
             }
         });
@@ -229,7 +242,7 @@ async function actionConnection() {
 }
 export async function checkBotConnection() {
     const { generation, value } = await actionConnection();
-    const { status, data } = await native().sendBotNotification(value.url, value.key, "status", value.userId);
+    const { status, data } = await send(value, "status", value.userId);
     const body = responseBody(data);
     if (!sameSession(generation, value)) throw new Error("Notification settings changed or the session stopped.");
     if (status !== 200) throw new Error(responseError(body.error, "Could not reach notification bot."));
@@ -239,10 +252,10 @@ export async function checkBotConnection() {
 export async function sendTestDM() {
     const { generation, value } = await actionConnection();
     const event: NotificationEvent = { eventId: crypto.randomUUID(), kind: "test", discordUserId: value.userId, occurredAt: new Date().toISOString() };
-    const { status, data } = await native().sendBotNotification(value.url, value.key, "event", JSON.stringify(event));
+    const { status, data } = await send(value, "event", JSON.stringify(event));
     const body = responseBody(data);
     if (!sameSession(generation, value)) throw new Error("Notification settings changed or the session stopped.");
-    if (status !== 202 || body.accepted !== true) throw new Error(responseError(body.error, "Could not send test DM."));
+    if ((value.mode === "direct" ? status !== 200 : status !== 202) || body.accepted !== true) throw new Error(responseError(body.error, "Could not send test DM."));
     scope = value.scope;
-    update("Test queued — click Check Connection to confirm delivery");
+    update(value.mode === "direct" ? "Test DM delivered" : "Test queued — click Check Connection to confirm delivery");
 }

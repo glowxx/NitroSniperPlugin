@@ -6,7 +6,22 @@ Client redemption uses Discord's own gift action. A notification is created **on
 
 ## Bot DM notifications
 
-### For users
+### Simple setup: paste the bot token in the plugin
+
+1. Create a bot in the Discord Developer Portal and invite it to a server you belong to. Allow DMs from that server.
+2. Open NitroSniper settings, leave **DM setup → Bot token (recommended)** selected, paste the **bot token**, and click **Connect bot**.
+3. The input clears immediately. The panel shows the connected bot's name; the saved token cannot be displayed again. Click **Send Test DM** to verify delivery.
+
+No external service, `.env` editing, running bot process or slash-command registration is needed in this mode. Discord API requests run in the desktop native process using the saved bot token. The token is encrypted with Electron `safeStorage` in the current OS user's profile and is absent from normal plugin settings and settings exports. Plaintext storage fallback is refused; Linux requires a working system keyring. **Disconnect** removes the token for the current Discord account and aborts pending sends. Other Discord accounts have separate connections. Already sent messages cannot be recalled.
+
+Keep the desktop client running for DMs to send. Confirmed events still use the persistent local outbox, expire after 24 hours and retry transient errors/rate limits. A blocked DM or revoked token is reported as a terminal error for that event; fix the connection and send a new test. This mode can only deliver after the running client reports a successful claim. Server-side delivery while the client is closed remains available through the optional external-service mode below.
+
+If replacing an already connected bot fails, the previous connection is retained. Replacing or removing a bot isolates the old connection's outbox; those events are not redirected to the new bot. Nonces reduce duplicate DMs after ambiguous responses or restarts, but cannot provide an unlimited exactly-once guarantee.
+
+### External notification service (advanced)
+
+Existing configured service installations retain that mode on the first update. To configure a service manually, select **DM setup → External notification service (advanced)**. Its URL and key fields appear inside the panel.
+
 
 1. Join a server containing the notification bot and allow its DMs.
 2. Run **`/notifications link`**. The bot checks DM delivery and privately returns the service URL and an account-specific key.
@@ -15,7 +30,7 @@ Client redemption uses Discord's own gift action. A notification is created **on
 
 A successful claim produces a DM with the gift type when available, time, and source-message link. The source link requires your normal permission to view that message. Failed attempts are sent only to the optional webhook. Neither notification channel exposes the gift code.
 
-The key can send notifications only to the Discord account that created it. **Never paste the bot token or a Discord user token into the plugin.** The key is masked in settings but stored in the client's settings; keep settings exports private. Run `/notifications link` again to replace a key or `/notifications disconnect` to revoke it and cancel queued messages. Disabling notifications locally stops new events and local retries; already accepted server events may still be delivered. Disconnect to cancel those too.
+The key can send notifications only to the Discord account that created it. **In external-service mode, paste only the notification key; its bot token stays on the server. Never use a Discord user token.** The key is masked in settings but stored in the client's settings; keep settings exports private. Run `/notifications link` again to replace a key or `/notifications disconnect` to revoke it and cancel queued messages. Disabling notifications locally stops new events and local retries; already accepted server events may still be delivered. Disconnect to cancel those too.
 
 | Command | Purpose |
 | --- | --- |

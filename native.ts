@@ -86,3 +86,16 @@ export async function sendBotNotification(_: IpcMainInvokeEvent, serviceUrl: str
     url.pathname = "/v1/events";
     return request(url, "POST", payload, key);
 }
+
+export async function connectDirectBot(_: IpcMainInvokeEvent, userId: string, token: string) {
+    return (await import("./directBot")).directBot.connect(userId, token);
+}
+export async function getDirectBotStatus(_: IpcMainInvokeEvent, userId: string) {
+    return (await import("./directBot")).directBot.status(userId);
+}
+export async function disconnectDirectBot(_: IpcMainInvokeEvent, userId: string) {
+    return (await import("./directBot")).directBot.disconnect(userId);
+}
+export async function sendDirectBotNotification(_: IpcMainInvokeEvent, userId: string, credentialId: string, payload: string) {
+    return (await import("./directBot")).directBot.send(userId, credentialId, payload);
+}
