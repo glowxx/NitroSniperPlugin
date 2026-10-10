@@ -111,9 +111,23 @@ export class NotificationService {
     }
     disconnect(userId) {
         this.ensureOwner();
-        this.db.prepare('DELETE FROM links WHERE user_id=?').run(userId);
-        this.db.prepare("UPDATE events SET state='cancelled',error='Disconnected',updated_at=? WHERE user_id=? AND state='queued'").run(this.now(), userId);
-        if (this.delivery?.userId === userId) this.delivery.controller.abort();
+        try {
+            // Revoke the key and cancel its backlog together; a partial write must not survive relinking.
+            this.db.exec('BEGIN IMMEDIATE');
+            try {
+                this.db.prepare('DELETE FROM links WHERE user_id=?').run(userId);
+                this.db.prepare("UPDATE events SET state='cancelled',error='Disconnected',updated_at=? WHERE user_id=? AND state='queued'").run(this.now(), userId);
+                this.db.exec('COMMIT');
+            } catch (error) {
+                this.db.exec('ROLLBACK');
+                throw error;
+            }
+        } catch {
+            throw new ServiceError(503, 'Could not disconnect notifications. Your key may still be active; retry /notifications disconnect.');
+        } finally {
+            // Honour the user's cancellation request even when persistence fails.
+            if (this.delivery?.userId === userId) this.delivery.controller.abort();
+        }
     }
     authenticate(token, userId) {
         this.ensureOwner();

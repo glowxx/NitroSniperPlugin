@@ -10,6 +10,8 @@ import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 import { Button, showToast, Toasts, useEffect, useState } from "@webpack/common";
 
+import { DirectBotPanel } from "./directBotPanel";
+
 import { checkBotConnection, getNotificationStatus, sendTestDM, subscribeNotifications } from "./notifications";
 import { sendTestWebhook } from "./webhook";
 
@@ -24,7 +26,7 @@ function TestWebhookButton() {
     }}>{busy ? "Sending…" : "Send Test Webhook"}</Button>;
 }
 
-function BotNotificationPanel() {
+function ServiceNotificationPanel() {
     const values = settings.use(["botNotificationsEnabled", "botServiceUrl", "botNotificationKey"]);
     const [status, setStatus] = useState(getNotificationStatus);
     const [busy, setBusy] = useState(false);
@@ -38,6 +40,9 @@ function BotNotificationPanel() {
     const disabled = busy || !values.botNotificationsEnabled || !values.botServiceUrl.trim() || !values.botNotificationKey.trim();
     return <div style={{ display: "grid", gap: 12, color: "var(--text-default, var(--text-normal))" }}>
         <div>Run <strong>/notifications link</strong> with your bot, paste its service URL and key below, enable DM notifications, then send a test.</div>
+        <label style={{ display: "grid", gap: 6 }}>Service URL
+            <input aria-label="Service URL" value={values.botServiceUrl} onChange={event => { settings.store.botServiceUrl = event.currentTarget.value; }} />
+        </label>
         <label style={{ display: "grid", gap: 6 }}>Notification key
             <input type="password" autoComplete="off" spellCheck={false}
                 aria-label="Notification key" placeholder="Paste the key from /notifications link"
@@ -52,6 +57,11 @@ function BotNotificationPanel() {
         </div>
         <div style={{ fontSize: 13 }}>Only successful claims trigger a DM. Failed attempts stay in your webhook. To revoke access, run <strong>/notifications disconnect</strong>. This key is stored in your client settings; keep settings exports private.</div>
     </div>;
+}
+
+function BotNotificationPanel() {
+    const values = settings.use(["botNotificationMode"]);
+    return values.botNotificationMode === "service" ? <ServiceNotificationPanel /> : <DirectBotPanel />;
 }
 
 export const settings = definePluginSettings({
@@ -75,10 +85,18 @@ export const settings = definePluginSettings({
         description: "Bot DM notifications — send a private notification after each successful claim.",
         default: false
     },
+    botNotificationMode: {
+        type: OptionType.SELECT,
+        description: "DM setup — bot token is the simplest option.",
+        options: [{ label: "Bot token (recommended)", value: "direct", default: true }, { label: "External notification service (advanced)", value: "service" }]
+    },
+    botDirectAccounts: {
+        type: OptionType.STRING, description: "Saved bot connection details (no tokens).", default: "", hidden: true
+    },
     botServiceUrl: {
         type: OptionType.STRING,
         description: "Notification service URL provided by /notifications link (HTTPS, no extra path).",
-        default: ""
+        default: "", hidden: true
     },
     botNotificationKey: {
         type: OptionType.STRING,

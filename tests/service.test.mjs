@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NotificationService, createApi, validateEvent, buildMessage } from '../bot/service.mjs';
+import { NotificationService, ServiceError, createApi, validateEvent, buildMessage } from '../bot/service.mjs';
 const user = '123456789012345678';
 const other = '234567890123456789';
 const event = (id = 'a'.repeat(64)) => ({ eventId: id, kind: 'claimed', discordUserId: user, occurredAt: new Date().toISOString(), giftType: 'Nitro @everyone' });
@@ -45,6 +45,62 @@ test('concurrent workers do not duplicate; disconnect cancels in-flight state', 
     service.enqueue(event(), service.link(user)); const work = service.deliverDue(); await service.deliverDue();
     assert.equal(calls, 1); service.disconnect(user); finish(); await work;
     assert.equal(service.status(user).latest.state, 'cancelled'); service.close();
+});
+
+for (const failure of ['key deletion', 'second event cancellation']) {
+    test(`disconnect rolls back ${failure} failure and a successful retry cannot resurrect old DMs`, async () => {
+        const sent = [];
+        const service = setup(async id => sent.push(id));
+        try {
+            const key = service.link(user);
+            service.enqueue(event('a'.repeat(64)), key);
+            service.enqueue(event('b'.repeat(64)), key);
+            const otherKey = service.link(other);
+            service.enqueue({ ...event('c'.repeat(64)), discordUserId: other }, otherKey);
+            service.db.exec(failure === 'key deletion'
+                ? `CREATE TRIGGER fail_disconnect BEFORE DELETE ON links WHEN OLD.user_id='${user}' BEGIN SELECT RAISE(ABORT,'simulated delete failure'); END`
+                : `CREATE TRIGGER fail_disconnect BEFORE UPDATE ON events WHEN NEW.state='cancelled' AND OLD.event_id='${'b'.repeat(64)}' BEGIN SELECT RAISE(ABORT,'simulated cancellation failure'); END`);
+
+            assert.throws(() => service.disconnect(user), error => error instanceof ServiceError && error.status === 503 && /retry.*disconnect/i.test(error.message));
+            assert.equal(service.authenticate(key, user).user_id, user);
+            assert.equal(service.status(user).pending, 2);
+            assert.equal(service.db.prepare("SELECT count(*) AS count FROM events WHERE user_id=? AND state='cancelled'").get(user).count, 0);
+            assert.equal(service.authenticate(otherKey, other).user_id, other);
+            assert.equal(service.status(other).pending, 1);
+
+            service.db.exec('DROP TRIGGER fail_disconnect');
+            service.disconnect(user);
+            assert.throws(() => service.authenticate(key, user), { status: 401 });
+            assert.equal(service.status(user).pending, 0);
+            const replacementKey = service.link(user);
+            await service.deliverDue();
+            assert.deepEqual(sent, [other]);
+            assert.equal(service.db.prepare("SELECT count(*) AS count FROM events WHERE user_id=? AND state='cancelled'").get(user).count, 2);
+            service.enqueue(event('d'.repeat(64)), replacementKey);
+            await service.deliverDue();
+            assert.deepEqual(sent, [other, user]);
+        } finally { service.close(); }
+    });
+}
+
+test('a failed disconnect also aborts its in-flight delivery while retaining a consistent connection', async () => {
+    let signal;
+    const service = setup((id, payload, canSend, requestSignal) => {
+        signal = requestSignal;
+        return new Promise(resolve => signal.addEventListener('abort', () => resolve(false), { once: true }));
+    });
+    let work;
+    try {
+        const key = service.link(user);
+        service.enqueue(event(), key);
+        work = service.deliverDue();
+        service.db.exec("CREATE TRIGGER fail_disconnect BEFORE UPDATE ON events WHEN NEW.state='cancelled' BEGIN SELECT RAISE(ABORT,'simulated cancellation failure'); END");
+        assert.throws(() => service.disconnect(user), { status: 503 });
+        assert.equal(signal.aborted, true);
+        await work;
+        assert.equal(service.authenticate(key, user).user_id, user);
+        assert.equal(service.status(user).latest.state, 'queued');
+    } finally { service.stop(); await work; service.close(); }
 });
 test('validates event times, sizes, kind, source IDs and never forwards arbitrary fields', () => {
     assert.throws(() => validateEvent({ ...event(), kind: 'failed' }), { status: 400 });

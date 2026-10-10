@@ -58,3 +58,25 @@ test('disconnect during a slow interaction acknowledgement cancels linking befor
     const pending = handler.handle(link); await tick(); await handler.handle(interaction('disconnect')); acknowledge(); await pending;
     assert.equal(sent, 0); assert.equal(service.status(user).linked, false); service.close();
 });
+
+test('disconnect write failure reports a retryable error without confirming a revoked connection', async () => {
+    const service = new NotificationService({ database: ':memory:', sendDM: async () => {} });
+    try {
+        const key = service.link(user);
+        service.enqueueForUser({ eventId: 'disconnect-command-test', kind: 'test', discordUserId: user, occurredAt: new Date().toISOString() });
+        service.db.exec("CREATE TRIGGER fail_disconnect BEFORE UPDATE ON events WHEN NEW.state='cancelled' BEGIN SELECT RAISE(ABORT,'simulated write failure'); END");
+        const handler = createInteractionHandler({ service, publicUrl: 'https://notify.example.com' });
+        const failed = interaction('disconnect');
+        await handler.handle(failed);
+        assert.match(failed.edits.at(-1), /retry.*disconnect/i);
+        assert.doesNotMatch(failed.edits.at(-1), /^Disconnected\./);
+        assert.equal(service.authenticate(key, user).user_id, user);
+        assert.equal(service.status(user).pending, 1);
+        service.db.exec('DROP TRIGGER fail_disconnect');
+        const retried = interaction('disconnect');
+        await handler.handle(retried);
+        assert.match(retried.edits.at(-1), /^Disconnected\./);
+        assert.equal(service.status(user).linked, false);
+        assert.equal(service.status(user).pending, 0);
+    } finally { service.close(); }
+});

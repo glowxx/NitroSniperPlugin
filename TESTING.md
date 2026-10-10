@@ -1,5 +1,14 @@
 # Verification
 
+## Direct bot-token setup — 2026-10-10
+
+- All 136 tests pass on Node.js 24.19.0 and 22.13.0, including four atomic-disconnect regressions and thirteen direct-mode tests.
+- Direct-mode integration exercises token verification, native Discord requests, the actual plugin callback, a persisted local outbox and removal after confirmed delivery. Discord HTTP responses and OS encryption are simulated; no real token is used.
+- Panel interaction tests verify immediate input clearing, metadata-only settings, disconnect cleanup, failure feedback and account changes during setup.
+- Vault tests verify ciphertext-only files, reload, deletion and refusing unavailable encryption/plaintext fallback. They do not establish real Windows/macOS/Linux keyring behaviour in an authenticated desktop client.
+- Vencord and Equicord type checking and standalone desktop bundling pass against the pinned host revisions below, using their declared pnpm 11.9.0 and 12.6.0 respectively.
+- Real bot DMs and live visual/keyring checks remain outstanding: connect a bot, invite it to a shared server, allow DMs, send a test, restart Discord, and verify that the connection remains available without token readback.
+
 ## Final re-audit corrections — 2026-10-04
 
 | Check | Result |

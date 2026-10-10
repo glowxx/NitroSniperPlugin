@@ -1,6 +1,6 @@
 import { build } from 'esbuild';
 export async function loadTS(file, mocks = {}) {
-    const result = await build({ entryPoints: [file], bundle: true, write: false, platform: 'node', format: 'esm', target: 'node22',
+    const result = await build({ entryPoints: [file], bundle: true, write: false, platform: 'node', format: 'esm', target: 'node22', jsx: 'automatic', external: ['electron'],
         plugins: [{ name: 'mocks', setup(builder) {
             builder.onResolve({ filter: /.*/ }, args => Object.hasOwn(mocks, args.path) ? { path: args.path, namespace: 'mock' } : undefined);
             builder.onLoad({ filter: /.*/, namespace: 'mock' }, args => ({ contents: mocks[args.path], loader: 'js' }));
