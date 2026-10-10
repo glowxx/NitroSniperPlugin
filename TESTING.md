@@ -1,4 +1,42 @@
-# Verification — 2026-10-01
+# Verification
+
+## Final re-audit corrections — 2026-10-04
+
+| Check | Result |
+| --- | --- |
+| Full regression/integration suite, Node 24.19.0 | 119 passed |
+| Full suite, minimum supported Node 22.13.0 | 119 passed |
+| Plugin bundles and bot syntax, Node 24 and 22.13.0 | Passed |
+| Pinned Vencord and Equicord type checks and standalone desktop builds | Passed |
+| Vencord plugin ESLint, preserving original MIT attribution | Passed |
+| Isolated mutations of gateway recognition, reconciliation, REST signal, abortable waits and pairing cancellation | Regressions detected |
+| Final independent read-only client and bot review | No further required corrections found |
+
+The new tests reproduce delayed recipient lookup/DM-channel creation, disconnect/relink, expiry and shutdown; use real discord.js serialization and REST buckets; check cancellation during a real local rate-limit sleep; validate pairing cancellation and private key activation; and run the bot entrypoint in separate processes to check SIGTERM and login-failure exit codes. Client regressions cover clock offsets, account changes, local/push envelopes, missing fields and deduplicated gateway replay. Outbox regressions cover terminal non-JSON rejections and metadata finishing during transport.
+
+Every confirmed bug was reproduced before its correction. Mutations were made only in disposable copies, with the original project untouched. The public Discord client envelope was checked against `web.24a0dd4254453b09.js`; no real gift or account token was used. See [AUDIT.md](AUDIT.md) for the final findings, corrections and limits.
+
+## Previous follow-up fixes — 2026-10-04
+
+| Check | Result |
+| --- | --- |
+| Full regression/integration suite, Node 24.19.0 (`npm test`) | 87 passed |
+| Full suite, minimum supported Node 22.13.0 (`node --test tests/*.test.mjs`) | 87 passed |
+| Plugin bundles and bot syntax (`npm run check`), Node 24 and 22.13.0 | Passed |
+| Vencord `testTsc`, `buildStandalone` | Passed |
+| Equicord `testTsc`, desktop/Equibop `buildStandalone` | Passed |
+| Vencord plugin ESLint, excluding its copyright-header rule to preserve MIT attribution | Passed |
+| Mutation of transient-retry condition in a disposable source copy | 13 claim-recovery tests failed, as expected |
+
+The host revisions are the same pinned revisions listed below. Host dependencies were installed with scripts disabled; Vencord used its declared pnpm 11.9.0 and Equicord its declared pnpm 12.6.0. No dependency manifest or lockfile was changed in the plugin repository.
+
+New regressions cover formatted/spoofed gift links, transient/permanent/unknown errors, cooldown and Discord retry-after, the three-dispatch cap, cancelled retry budgets, stale callbacks, no automatic claiming, visible unsaved events, invalid replacement settings, optional metadata write failure, outages longer than thirty minutes, expiry during recipient lookup, metadata aborts/slot recovery and native response validation.
+
+The metadata abort contract follows Node's documented `AbortSignal.timeout`: https://nodejs.org/docs/latest-v22.x/api/globals.html#static-method-abortsignaltimeoutdelay. An unauthenticated request to the restricted gift endpoint with a deliberately invalid code returned Discord's `404 / Unknown Gift Code`; no real gift was queried or redeemed. Automated metadata tests simulate Discord responses and aborts.
+
+Live-client checks listed below remain outstanding. These results do not establish live Discord gift compatibility, visual settings correctness or real DM delivery.
+
+## Previous verification — 2026-10-01
 
 | Check | Result |
 | --- | --- |

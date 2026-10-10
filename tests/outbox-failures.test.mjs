@@ -117,3 +117,40 @@ test('API rate limits defer client retries for at least the advertised minute', 
         assert.ok(data.value[0].nextAt >= before + 60_000);
     } finally { notifications.stopNotifications(); }
 });
+
+for (const reply of ['<html>Not Found</html>', 'Not Found', '', '{"error":"Unknown route."}']) {
+    test(`a terminal HTTP rejection reports that the removed notification will not retry: ${JSON.stringify(reply)}`, async () => {
+        setup();
+        globalThis.VencordNative.pluginHelpers.NitroSniper.sendBotNotification = async (...args) => {
+            sends.push(args); return { status: 404, data: reply };
+        };
+        try {
+            await notifications.startNotifications(() => config); await tick();
+            await notifications.enqueueNotification(event); await tick();
+            assert.equal(data.value.length, 0);
+            assert.equal(sends.length, 1);
+            assert.match(notifications.getNotificationStatus().message, /rejected.*404.*will not retry/i);
+            assert.doesNotMatch(notifications.getNotificationStatus().message, /retry automatically/i);
+        } finally { notifications.stopNotifications(); }
+    });
+}
+
+test('metadata finishing during transport cannot lose the acceptance or cause resubmission', async t => {
+    setup(); let now = Date.now();
+    t.mock.method(Date, 'now', () => now);
+    let poll, finishMetadata, accept;
+    t.mock.method(globalThis, 'setInterval', callback => { poll = callback; return 987654; });
+    globalThis.VencordNative.pluginHelpers.NitroSniper.sendBotNotification = async (...args) => {
+        sends.push(args); return await new Promise(resolve => { accept = resolve; });
+    };
+    try {
+        await notifications.startNotifications(() => config); await tick();
+        const enqueue = notifications.enqueueNotification(event, notifications.captureNotificationConfig(), new Promise(resolve => { finishMetadata = resolve; }));
+        await tick(); assert.equal(data.value.length, 1);
+        now += 3001; poll(); await tick(); assert.equal(sends.length, 1);
+        finishMetadata('Nitro'); await enqueue;
+        accept({ status: 202, data: '{"accepted":true}' }); await tick();
+        assert.equal(data.value.length, 0);
+        poll(); await tick(); assert.equal(sends.length, 1);
+    } finally { notifications.stopNotifications(); }
+});

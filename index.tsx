@@ -28,6 +28,15 @@ let started = false;
 let accountId = "";
 let lastOverflowWarning = 0;
 
+interface MessageCreateEvent {
+    message: Message & { guild_id?: string; };
+    channelId?: string;
+    guildId?: string;
+    optimistic?: boolean;
+    isPushNotification?: boolean;
+    sendMessageOptions?: unknown;
+}
+
 async function giftTypeWithDeadline(code: string) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -62,8 +71,13 @@ const queue = new ClaimQueue(
     (request, success) => {
         logger.log(success ? "Gift successfully redeemed" : "Gift redemption failed");
         const userId = request.claimantId;
-        if (userId) void notify(request, success, userId, session)
-            .catch(() => logger.error("Could not save DM notification. Check the notification settings and outbox."));
+        const generation = session;
+        if (userId) void notify(request, success, userId, generation).catch(() => {
+            logger.error("Could not save DM notification. Check the notification settings and outbox.");
+            if (started && generation === session && UserStore.getCurrentUser()?.id === userId) {
+                showToast("NitroSniper could not save a DM notification. Check the notification panel and connection settings.", Toasts.Type.FAILURE);
+            }
+        });
     },
     () => showToast("NitroSniper is still waiting for Discord. Check for an open gift or CAPTCHA dialog. If Discord never responds, fully restart the client.", Toasts.Type.FAILURE)
 );
@@ -95,17 +109,22 @@ export default definePlugin({
         stopNotifications();
     },
     flux: {
-        MESSAGE_CREATE({ message }: { message: Message; }) {
+        MESSAGE_CREATE(event: MessageCreateEvent) {
+            const { message, channelId, guildId, optimistic, isPushNotification } = event;
             if (!started || !message.content || !UserStore.getCurrentUser()) return;
+            // History loads do not emit this envelope. Local SDK messages and push replay are separate sources.
+            if (optimistic || isPushNotification || Object.hasOwn(event, "sendMessageOptions")) return;
+            if (channelId !== undefined && channelId !== message.channel_id) return;
             if (accountId !== UserStore.getCurrentUser()?.id) {
                 startSession();
-                // Account-change handling occurs at receipt time, after this fresh event was created.
-                const receivedTime = new Date(message.timestamp).getTime();
-                if (Number.isFinite(receivedTime) && Date.now() - receivedTime < 5000) startTime = Math.min(startTime, receivedTime);
             }
             if (settings.store.ignoreOwnGiftLinks && message.author?.id === UserStore.getCurrentUser()?.id) return;
             const timestamp = new Date(message.timestamp).getTime();
-            if (!Number.isFinite(timestamp) || timestamp < startTime) return;
+            // Verified Discord gateway shape: do not compare its server clock with the system clock.
+            // Keep the conservative timestamp filter for unknown client/event formats.
+            const gateway = optimistic === false && isPushNotification === false
+                && Object.hasOwn(event, "guildId") && guildId === message.guild_id && channelId === message.channel_id;
+            if (!Number.isFinite(timestamp) || (!gateway && timestamp < startTime)) return;
             for (const code of extractGiftCodes(message.content)) {
                 const authorId = message.author?.id;
                 const avatar = message.author?.avatar;

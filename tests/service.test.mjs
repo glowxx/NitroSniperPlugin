@@ -98,11 +98,20 @@ test('expiry uses event time rather than ingestion time, with normalized timesta
     service.close();
 });
 
-test('exhausted delivery attempts fail visibly instead of retrying forever', async () => {
-    const service = setup(async () => { throw new Error('offline'); });
-    service.enqueue(event(), service.link(user));
-    service.db.prepare('UPDATE events SET attempts=11').run(); await service.deliverDue();
-    assert.equal(service.status(user).latest.state, 'failed'); assert.match(service.status(user).latest.error, /repeated attempts/); service.close();
+test('many transient failures keep bounded backoff and stop at event expiry', async () => {
+    let now = Date.now();
+    const began = now;
+    const service = new NotificationService({ database: ':memory:', now: () => now, sendDM: async () => { throw new Error('offline'); } });
+    try {
+        service.enqueue({ ...event(), occurredAt: new Date(now).toISOString() }, service.link(user));
+        service.db.prepare('UPDATE events SET attempts=500').run(); await service.deliverDue();
+        assert.equal(service.status(user).latest.state, 'queued');
+        assert.equal(service.db.prepare('SELECT next_at FROM events').get().next_at, now + 300_000);
+        now = began + 86_400_000;
+        await service.deliverDue();
+        assert.equal(service.status(user).latest.state, 'failed');
+        assert.match(service.status(user).latest.error, /expired/);
+    } finally { service.close(); }
 });
 
 test('a second bot process cannot share the same database and duplicate delivery', async () => {

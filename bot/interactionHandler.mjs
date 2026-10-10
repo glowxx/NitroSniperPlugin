@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { MessageFlags } from 'discord.js';
 import { ServiceError } from './service.mjs';
+import { createDMSender } from './sendDM.mjs';
 
 /** Revoke promptly; a slow link request must never undo a subsequent disconnect. */
 export function createInteractionHandler({ service, publicUrl, isStopping = () => false, now = Date.now, log = () => {} }) {
     const accounts = new Map();
     const tasks = new Set();
+    let stopped = false;
     async function handle(interaction) {
         if (!interaction.isChatInputCommand() || interaction.commandName !== 'notifications') return;
         const userId = interaction.user.id;
@@ -15,10 +17,10 @@ export function createInteractionHandler({ service, publicUrl, isStopping = () =
         accounts.set(userId, account);
         account.touched = now();
         const requestedRevision = account.revision;
-        if (action === 'disconnect') account.revision++;
+        if (action === 'disconnect') { account.revision++; account.controller?.abort(); }
         try {
             await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-            if (isStopping()) throw new ServiceError(503, 'Notification bot is stopping. Please retry after it restarts.');
+            if (stopped || isStopping()) throw new ServiceError(503, 'Notification bot is stopping. Please retry after it restarts.');
             if (action === 'link') {
                 if (account.revision !== requestedRevision) throw new ServiceError(409, 'Link request cancelled by a newer account action.');
                 if (account.linking) return void await interaction.editReply('A link request is already in progress. Use /notifications disconnect to cancel it.');
@@ -26,16 +28,20 @@ export function createInteractionHandler({ service, publicUrl, isStopping = () =
                 account.nextAt = now() + 10_000;
                 account.linking = true;
                 const revision = ++account.revision;
-                const stillCurrent = () => !isStopping() && account.revision === revision;
+                const controller = new AbortController();
+                account.controller = controller;
+                const stillCurrent = () => !stopped && !isStopping() && !controller.signal.aborted && account.revision === revision;
                 try {
-                    await interaction.user.send({ content: 'NitroSniper DM delivery is working. Return to the command response for your connection key.', allowedMentions: { parse: [] } });
+                    await createDMSender(interaction.client ?? interaction.user.client)(userId,
+                        { content: 'NitroSniper DM delivery is working. Return to the command response for your connection key.', allowedMentions: { parse: [] } },
+                        stillCurrent, controller.signal);
                     if (!stillCurrent()) throw new ServiceError(409, 'Link request cancelled. Run /notifications link again when ready.');
                     const token = service.prepareLink(userId);
                     // Do not revoke a working key if Discord cannot deliver the private replacement.
                     await interaction.editReply(`**Connect your plugin**\n1. Open NitroSniper settings → Bot DM notifications.\n2. Service URL: \`${publicUrl}\`\n3. Notification key: \`${token}\`\n4. Enable notifications and click **Send Test DM**.\n\nThis key is only for your account. Keep it private. Running this command again replaces the previous key.`);
                     if (!stillCurrent()) throw new ServiceError(409, 'Link request cancelled. The displayed key was not activated.');
                     service.activateLink(userId, token);
-                } finally { account.linking = false; }
+                } finally { account.linking = false; account.controller = undefined; }
             } else if (action === 'disconnect') {
                 service.disconnect(userId);
                 await interaction.editReply('Disconnected. Your key is revoked and queued notifications are cancelled. A DM already sent to Discord cannot be recalled.');
@@ -65,6 +71,10 @@ export function createInteractionHandler({ service, publicUrl, isStopping = () =
             tasks.add(task);
             void task.finally(() => tasks.delete(task)).catch(() => {});
             return task;
+        },
+        stop() {
+            stopped = true;
+            for (const account of accounts.values()) { account.revision++; account.controller?.abort(); }
         },
         async drain() { await Promise.allSettled([...tasks]); }
     };

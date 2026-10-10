@@ -9,16 +9,16 @@ https://github.com/neoarz/NitroSniper
 import type { IpcMainInvokeEvent } from "electron";
 
 import { parseDiscordWebhook, parseServiceUrl } from "./notificationProtocol";
-import type { NativeWebhookResponse } from "./types";
+import type { GiftCodeResolution, NativeWebhookResponse } from "./types";
 
-async function request(url: URL, method: string, payload?: string, key?: string): Promise<NativeWebhookResponse> {
+async function request(url: URL, method: string, payload?: string, key?: string, timeoutMs = 10_000): Promise<NativeWebhookResponse> {
     try {
         const response = await fetch(url, {
             method,
             headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
             body: payload,
             redirect: "error",
-            signal: AbortSignal.timeout(10_000)
+            signal: AbortSignal.timeout(timeoutMs)
         });
         // Bound the reply as well as the request; a misconfigured service cannot grow memory forever.
         const reader = response.body?.getReader();
@@ -42,6 +42,27 @@ async function request(url: URL, method: string, payload?: string, key?: string)
         // Fetch errors can contain credential-bearing URLs; never return raw errors to renderer logs.
         return { status: -1, data: "Notification request failed or timed out." };
     }
+}
+
+let metadataLookups = 0;
+
+/** Resolve optional public gift metadata without a Discord account token. */
+export async function resolveGiftMetadata(_: IpcMainInvokeEvent, code: string): Promise<string | null> {
+    if (typeof code !== "string" || !/^[A-Za-z0-9]{16,24}$/.test(code) || metadataLookups >= 4) return null;
+    metadataLookups++;
+    try {
+        const url = new URL(`https://discord.com/api/v10/entitlements/gift-codes/${code}`);
+        url.searchParams.set("with_application", "false");
+        url.searchParams.set("with_subscription_plan", "true");
+        // Node fetch aborts the underlying request, including reading the response body.
+        // https://nodejs.org/docs/latest-v22.x/api/globals.html#static-method-abortsignaltimeoutdelay
+        const { status, data } = await request(url, "GET", undefined, undefined, 3000);
+        if (status !== 200) return null;
+        const body: GiftCodeResolution | null = JSON.parse(data);
+        const name = body?.subscription_plan?.name ?? body?.store_listing?.sku?.name;
+        return typeof name === "string" ? name.slice(0, 200) || null : null;
+    } catch { return null; }
+    finally { metadataLookups--; }
 }
 
 export async function sendWebhook(_: IpcMainInvokeEvent, webhookUrl: string, payload: string): Promise<NativeWebhookResponse> {

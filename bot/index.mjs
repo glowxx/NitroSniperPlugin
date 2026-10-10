@@ -2,16 +2,12 @@ import { Client, GatewayIntentBits } from 'discord.js';
 import { config } from './config.mjs';
 import { createInteractionHandler } from './interactionHandler.mjs';
 import { NotificationService, createApi } from './service.mjs';
+import { createDMSender } from './sendDM.mjs';
 
 const options = config();
 const client = new Client({ intents: [GatewayIntentBits.Guilds], rest: { timeout: 10_000, retries: 2 } });
 let stopping = false;
-const service = new NotificationService({ database: options.database, onLeaseLost: () => { console.error("Database ownership lost; stopping the bot."); void shutdown(1); }, sendDM: async (userId, payload, canSend) => {
-    const user = await client.users.fetch(userId);
-    // Fetching a user can take seconds: recheck consent immediately before dispatching the DM.
-    if (!canSend()) return false;
-    await user.send(payload);
-} });
+const service = new NotificationService({ database: options.database, onLeaseLost: () => { console.error("Database ownership lost; stopping the bot."); void shutdown(1); }, sendDM: createDMSender(client) });
 const server = createApi(service, { ready: () => !stopping && !service.stopping && client.isReady() });
 const commands = createInteractionHandler({ service, publicUrl: options.publicUrl, isStopping: () => stopping || service.stopping, log: console.error });
 const onInteraction = interaction => void commands.handle(interaction).catch(() => console.error('Notification command failed.'));
@@ -29,6 +25,7 @@ async function shutdown(code = 0) {
     if (stopping) return;
     stopping = true;
     service.stop();
+    commands.stop();
     clearInterval(worker);
     client.removeListener('interactionCreate', onInteraction);
     const deadline = setTimeout(() => process.exit(1), 30_000);
@@ -40,9 +37,10 @@ async function shutdown(code = 0) {
     ]);
     while (service.busy) await new Promise(resolve => setTimeout(resolve, 50));
     service.close();
-    client.destroy();
+    await client.destroy();
     clearTimeout(deadline);
-    process.exitCode = code;
+    // Aborted SDK rate-limit waits may retain timers after all owned work has drained.
+    process.exit(code);
 }
 process.on('SIGINT', () => void shutdown());
 process.on('SIGTERM', () => void shutdown());

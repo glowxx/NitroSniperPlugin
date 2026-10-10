@@ -2,22 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadTS } from './helpers.mjs';
 globalThis.nsMetadata = { requests: [] };
-const { resolveGiftType } = await loadTS('giftCode.ts', { '@webpack/common': `export const Constants={Endpoints:{GIFT_CODE_RESOLVE:c=>c}}; export const RestAPI={get:async o=>globalThis.nsMetadata.fetch(o)}` });
+const { resolveGiftType } = await loadTS('giftCode.ts');
 const webhook = await loadTS('webhook.ts');
 test('hanging metadata lookups are bounded without blocking subsequent claim handling', async () => {
     const releases = [];
-    globalThis.nsMetadata.fetch = () => new Promise(resolve => releases.push(resolve));
+    globalThis.VencordNative = { pluginHelpers: { NitroSniper: { resolveGiftMetadata: () => new Promise(resolve => releases.push(resolve)) } } };
     const lookups = Array.from({ length: 4 }, (_, i) => resolveGiftType('code' + i));
     assert.equal(await resolveGiftType('overflow'), null); assert.equal(releases.length, 4);
-    for (const release of releases) release({ body: { subscription_plan: { name: 'Nitro' } } });
+    for (const release of releases) release('Nitro');
     assert.deepEqual(await Promise.all(lookups), Array(4).fill('Nitro'));
-    globalThis.nsMetadata.fetch = async () => ({ body: { subscription_plan: { name: 'Nitro' } } });
+    globalThis.VencordNative.pluginHelpers.NitroSniper.resolveGiftMetadata = async () => 'Nitro';
     assert.equal(await resolveGiftType('new'), 'Nitro');
 });
 test('metadata errors or unexpected name types never escape as a notification failure', async () => {
-    globalThis.nsMetadata.fetch = async () => ({ body: { subscription_plan: { name: { corrupt: true } } } });
+    globalThis.VencordNative.pluginHelpers.NitroSniper.resolveGiftMetadata = async () => ({ corrupt: true });
     assert.equal(await resolveGiftType('code'), null);
-    globalThis.nsMetadata.fetch = async () => { throw new Error('offline'); };
+    globalThis.VencordNative.pluginHelpers.NitroSniper.resolveGiftMetadata = async () => { throw new Error('offline'); };
     assert.equal(await resolveGiftType('code'), null);
 });
 test('webhooks escape names and gift type markdown, suppress mentions and omit gift codes', async () => {

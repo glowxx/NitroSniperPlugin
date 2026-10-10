@@ -6,10 +6,11 @@ import { type NotificationEvent, parseServiceUrl } from "./notificationProtocol"
 export interface NotificationConfig { enabled: boolean; url: string; key: string; userId: string; }
 interface Connection extends NotificationConfig { scope: string; }
 interface Pending { event: NotificationEvent; scope: string; attempts: number; nextAt: number; }
-export interface NotificationStatus { message: string; pending: number; }
+export interface NotificationStatus { message: string; pending: number; unsaved: number; }
 const STORE_KEY = "NitroSniper.notificationOutbox.v1";
 const DAY = 86_400_000;
-let state: NotificationStatus = { message: "Not connected", pending: 0 };
+let state: NotificationStatus = { message: "Not connected", pending: 0, unsaved: 0 };
+let saveFailures: { connection: Connection; count: number; } | undefined;
 const subscribers = new Set<() => void>();
 let config: () => NotificationConfig;
 let queue: Pending[] = [];
@@ -28,8 +29,9 @@ const serial = <T,>(fn: () => Promise<T>): Promise<T> => {
 };
 function update(message: string) {
     const pending = queue.filter(item => item.scope === scope).length;
-    if (state.message === message && state.pending === pending) return;
-    state = { message, pending };
+    const unsaved = saveFailures?.connection.scope === scope && sameSession(epoch, saveFailures.connection) ? saveFailures.count : 0;
+    if (state.message === message && state.pending === pending && state.unsaved === unsaved) return;
+    state = { message, pending, unsaved };
     subscribers.forEach(fn => fn());
 }
 export const getNotificationStatus = () => state;
@@ -99,6 +101,7 @@ export async function startNotifications(getConfig: () => NotificationConfig) {
     active = true;
     loaded = false;
     loadError = undefined;
+    saveFailures = undefined;
     scope = "";
     const generation = epoch;
     try {
@@ -137,15 +140,23 @@ export async function enqueueNotification(event: NotificationEvent, expectedConf
         if (!loaded) throw new Error("DM outbox has not loaded. Notifications are paused.");
         const value = await connection(expectedConfig ?? config());
         if (!sameSession(generation, value) || event.discordUserId !== value.userId) return;
-        const clean = cleanEvent(event);
         scope = value.scope;
-        const remaining = queue.filter(item => Date.now() - Date.parse(item.event.occurredAt) < DAY);
-        if (remaining.some(item => item.scope === scope && item.event.eventId === event.eventId)) return;
-        if (remaining.length >= 100) throw new Error("DM outbox is full. Check the bot connection.");
-        const item = { event: clean, scope, attempts: 0, nextAt: Date.now() + (giftType ? 3000 : 0) };
-        await commit([...remaining, item]);
-        saved = item;
-        savedConnection = value;
+        try {
+            const clean = cleanEvent(event);
+            const remaining = queue.filter(item => Date.now() - Date.parse(item.event.occurredAt) < DAY);
+            if (remaining.some(item => item.scope === scope && item.event.eventId === event.eventId)) return;
+            if (remaining.length >= 100) throw new Error("DM outbox is full. Check the bot connection.");
+            const item = { event: clean, scope, attempts: 0, nextAt: Date.now() + (giftType ? 3000 : 0) };
+            await commit([...remaining, item]);
+            saved = item;
+            savedConnection = value;
+        } catch (error) {
+            if (sameSession(generation, value)) {
+                saveFailures = { connection: value, count: (saveFailures?.connection.scope === value.scope ? saveFailures.count : 0) + 1 };
+                update(error instanceof Error ? error.message : "Could not save the confirmed-claim notification.");
+            }
+            throw error;
+        }
         if (sameSession(generation, value)) update("Notification saved for delivery");
     });
     // Metadata is optional. The event is already durable, even if the client stops during lookup.
@@ -155,6 +166,9 @@ export async function enqueueNotification(event: NotificationEvent, expectedConf
             if (!sameSession(generation, savedConnection) || !queue.includes(saved!)) return;
             const enriched = { ...saved!, event: { ...saved!.event, giftType: typeof type === "string" ? type.slice(0, 200) || undefined : undefined }, nextAt: Date.now() };
             await commit(queue.map(item => item === saved ? enriched : item));
+        }).catch(() => {
+            // The original event is already durable; optional enrichment must not turn it into a failed save.
+            if (sameSession(generation, savedConnection)) update("Notification saved; optional gift details could not be updated.");
         });
     }
     if (sameSession(generation)) void flush();
@@ -185,17 +199,21 @@ async function flush() {
         const accepted = status >= 200 && status < 300 && body.accepted === true;
         const terminal = status >= 400 && status < 500 && ![401, 403, 408, 429].includes(status);
         await serial(async () => {
-            if (!sameSession(generation, value) || !queue.includes(pending)) return;
-            if (accepted || terminal) await commit(queue.filter(item => item !== pending));
+            if (!sameSession(generation, value)) return;
+            // Optional enrichment can replace the object while the HTTP request is in flight.
+            const current = queue.find(item => item.scope === pending.scope && item.event.eventId === pending.event.eventId);
+            if (!current) return;
+            if (accepted || terminal) await commit(queue.filter(item => item !== current));
             else {
-                const attempts = pending.attempts + 1;
+                const attempts = current.attempts + 1;
                 const nextAt = Date.now() + ([401, 403].includes(status) ? 300_000 : status === 429 ? 60_000 : Math.min(300_000, 5000 * 2 ** Math.min(attempts, 6)));
-                await commit(queue.map(item => item === pending ? { ...pending, attempts, nextAt } : item));
+                await commit(queue.map(item => item === current ? { ...current, attempts, nextAt } : item));
             }
         });
         if (!sameSession(generation, value)) return;
         update(accepted ? (body.state === "delivered" ? "Last DM delivered" : body.state === "failed" ? "Last DM failed. Check connection status." : "Accepted by bot — check status for DM delivery")
-            : responseError(body.error, "Bot unavailable — notification will retry automatically"));
+            : terminal ? `Notification rejected (HTTP ${status}) — it will not retry. ${responseError(body.error, "Check the service URL and bot configuration.")}`
+                : responseError(body.error, "Bot unavailable — notification will retry automatically"));
     } catch (error) {
         if (sameSession(generation)) update(error instanceof Error ? error.message : "Notification connection failed");
     } finally { busy = false; }

@@ -1,10 +1,18 @@
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { Client, User } from 'discord.js';
 import { NotificationService } from '../bot/service.mjs';
 import { createInteractionHandler } from '../bot/interactionHandler.mjs';
 const user = '123456789012345678';
+const clients = new Set();
+afterEach(async () => { for (const client of clients) await client.destroy(); clients.clear(); });
 function interaction(action, send = async () => {}) {
-    return { user: { id: user, send }, commandName: 'notifications', isChatInputCommand: () => true,
+    const client = new Client({ intents: [] }); clients.add(client);
+    const recipient = new User(client, { id: user, username: 'recipient', discriminator: '0', avatar: null });
+    client.users.fetch = async () => recipient;
+    recipient.createDM = async () => ({ id: '234567890123456789', client });
+    client.rest.post = async () => send();
+    return { client, user: recipient, commandName: 'notifications', isChatInputCommand: () => true,
         options: { getSubcommand: () => action }, edits: [],
         async deferReply() { this.deferred = true; }, async editReply(message) { this.edits.push(message); }, async reply() {} };
 }

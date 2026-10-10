@@ -45,6 +45,7 @@ function BotNotificationPanel() {
                 style={{ padding: 10, borderRadius: 4, border: "1px solid var(--input-border, transparent)", color: "var(--text-default, var(--text-normal))", background: "var(--input-background, var(--background-tertiary))" }} />
         </label>
         <div role="status" aria-live="polite">{values.botNotificationsEnabled ? status.message : "DM notifications disabled"} • {status.pending} pending locally</div>
+        {status.unsaved > 0 && <div role="alert">{status.unsaved} confirmed claim notification(s) could not be saved for this connection. These notifications will not be sent. Check the bot connection and local storage.</div>}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <Button disabled={disabled} onClick={() => void run(sendTestDM)}>Send Test DM</Button>
             <Button disabled={disabled} onClick={() => void run(checkBotConnection)}>Check Connection</Button>

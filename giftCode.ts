@@ -6,9 +6,7 @@ dm @neoarz if u need help or have any questions
 https://github.com/neoarz/NitroSniper
 */
 
-import { Constants, RestAPI } from "@webpack/common";
-
-import type { GiftCodeResolution } from "./types";
+import type { PluginNative } from "@utils/types";
 
 let activeLookups = 0;
 const MAX_LOOKUPS = 4;
@@ -17,16 +15,9 @@ export async function resolveGiftType(code: string): Promise<string | null> {
     if (activeLookups >= MAX_LOOKUPS) return null;
     activeLookups++;
     try {
-        const response: { body: GiftCodeResolution; } = await RestAPI.get({
-            url: Constants.Endpoints.GIFT_CODE_RESOLVE(code),
-            query: {
-                with_application: false,
-                with_subscription_plan: true
-            },
-            oldFormErrors: true
-        });
-
-        const name = response.body?.subscription_plan?.name ?? response.body?.store_listing?.sku?.name;
+        const helper = (globalThis as any).VencordNative?.pluginHelpers?.NitroSniper as PluginNative<typeof import("./native")> | undefined;
+        if (!helper?.resolveGiftMetadata) return null;
+        const name = await helper.resolveGiftMetadata(code);
         return typeof name === "string" ? name.slice(0, 200) || null : null;
     } catch {
         return null;

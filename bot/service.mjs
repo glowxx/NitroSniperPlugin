@@ -83,7 +83,7 @@ export class NotificationService {
     }
     loseLease() {
         if (this.stopping || this.closed) return;
-        this.stopping = true;
+        this.stop();
         this.onLeaseLost();
     }
     ownsLease() {
@@ -113,6 +113,7 @@ export class NotificationService {
         this.ensureOwner();
         this.db.prepare('DELETE FROM links WHERE user_id=?').run(userId);
         this.db.prepare("UPDATE events SET state='cancelled',error='Disconnected',updated_at=? WHERE user_id=? AND state='queued'").run(this.now(), userId);
+        if (this.delivery?.userId === userId) this.delivery.controller.abort();
     }
     authenticate(token, userId) {
         this.ensureOwner();
@@ -162,26 +163,30 @@ export class NotificationService {
             }
             const events = this.db.prepare("SELECT * FROM events WHERE state='queued' AND next_at<=? ORDER BY next_at LIMIT 20").all(now);
             for (const row of events) {
-                if (this.closed) break;
-                const canSend = () => !this.closed && !this.stopping && this.ownsLease() && this.status(row.user_id).linked
-                    && this.db.prepare('SELECT state FROM events WHERE user_id=? AND event_id=?').get(row.user_id, row.event_id)?.state === 'queued';
-                if (!canSend()) continue;
+                if (this.closed || this.stopping || !this.ownsLease()) break;
                 const payload = JSON.parse(row.payload);
                 if (this.now() - Date.parse(payload.occurredAt) >= DAY) {
                     this.db.prepare("UPDATE events SET state='failed',error='Delivery window expired',updated_at=? WHERE user_id=? AND event_id=? AND state='queued'")
                         .run(this.now(), row.user_id, row.event_id);
                     continue;
                 }
+                const canSend = () => !this.closed && !this.stopping && this.ownsLease() && this.status(row.user_id).linked
+                    && this.now() - Date.parse(payload.occurredAt) < DAY
+                    && this.db.prepare('SELECT state FROM events WHERE user_id=? AND event_id=?').get(row.user_id, row.event_id)?.state === 'queued';
+                if (!canSend()) continue;
                 let state = 'delivered', error = null, nextAt = now;
+                const controller = new AbortController();
+                this.delivery = { userId: row.user_id, controller };
+                const deadline = setTimeout(() => controller.abort(), Math.max(1, DAY - (this.now() - Date.parse(payload.occurredAt))));
+                deadline.unref();
                 try {
-                    if (await this.sendDM(row.user_id, buildMessage(payload), canSend) === false) continue;
+                    if (await this.sendDM(row.user_id, buildMessage(payload), canSend, controller.signal) === false) continue;
                 }
                 catch (err) {
                     const permanent = [50007, 50278, 50013, 10013, 50035].includes(Number(err?.code));
-                    state = permanent || row.attempts >= 11 ? 'failed' : 'queued';
+                    state = permanent ? 'failed' : 'queued';
                     error = [50007, 50278].includes(Number(err?.code)) ? 'Discord cannot deliver this DM. Allow DMs, unblock the bot, then send a new test.'
                         : permanent ? 'Discord rejected this notification. Check the account and bot permissions.'
-                        : row.attempts >= 11 ? 'Delivery failed after repeated attempts. Check the bot and send a new test.'
                         : 'Discord delivery temporarily unavailable.';
                     if ([50007, 50278, 10013].includes(Number(err?.code))) {
                         this.db.prepare("UPDATE events SET state='failed',error=?,updated_at=? WHERE user_id=? AND state='queued'")
@@ -189,13 +194,17 @@ export class NotificationService {
                     }
                     nextAt = this.now() + Math.min(300_000, 5000 * 2 ** Math.min(row.attempts, 6));
                 }
+                finally {
+                    clearTimeout(deadline);
+                    this.delivery = undefined;
+                }
                 // A disconnect during an in-flight request must not resurrect cancelled jobs.
                 this.db.prepare("UPDATE events SET state=?,error=?,attempts=attempts+1,next_at=?,updated_at=? WHERE user_id=? AND event_id=? AND state='queued'")
                     .run(state, error, nextAt, this.now(), row.user_id, row.event_id);
             }
         } finally { this.busy = false; }
     }
-    stop() { this.stopping = true; }
+    stop() { this.stopping = true; this.delivery?.controller.abort(); }
     close() {
         if (this.busy) throw new Error('Wait for the delivery worker before closing the database.');
         if (this.closed) return;
