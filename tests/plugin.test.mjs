@@ -9,7 +9,7 @@ const context = globalThis.nsPlugin;
 const { default: plugin } = await loadTS('index.tsx', {
     '@utils/Logger': 'export class Logger { log(){} error(){} }',
     '@utils/types': 'export default x => x;',
-    '@webpack': 'export function findByPropsLazy(){return {redeemGiftCode: o => {globalThis.nsPlugin.calls.push(o); return Promise.resolve();}}}',
+    '@webpack': 'export function findByPropsLazy(){return {redeemGiftCode: o => new Promise((resolve,reject)=>globalThis.nsPlugin.calls.push({...o,resolve,reject}))}}',
     '@webpack/common': 'export const ChannelStore={getChannel:()=>undefined}; export const UserStore={getCurrentUser:()=>({id:globalThis.nsPlugin.user})}; export const showToast=message=>globalThis.nsPlugin.toasts.push(message); export const Toasts={Type:{FAILURE:1}};',
     './settings': 'export const settings = {store:{webhookUrl:"", botNotificationsEnabled:true,botServiceUrl:"",botNotificationKey:"",ignoreOwnGiftLinks:true}};',
     './giftCode': 'export async function resolveGiftType(){return "Nitro"}',
@@ -19,14 +19,28 @@ const { default: plugin } = await loadTS('index.tsx', {
 function message(content, extra = {}) { return { content, timestamp: new Date(Date.now() + 1).toISOString(), author: { id: '234567890123456789', username: 'sender' }, channel_id: '345678901234567890', id: '456789012345678901', ...extra }; }
 function reset() { context.calls = []; context.events = []; context.toasts = []; context.failSave = false; context.savePromise = undefined; context.user = user; plugin.start(); }
 
-test('integration sends a success event only after onRedeemed, never on promise resolution or failed attempts', async () => {
+test('integration passes channel context and notifies once for callback plus Promise success, never for failures', async () => {
     reset(); plugin.flux.MESSAGE_CREATE({ message: message(`discord.gift/${code}`) }); await settle();
     assert.equal(context.calls.length, 1); assert.equal(context.events.length, 0);
-    context.calls[0].onRedeemed(); context.calls[0].onRedeemed(); await settle();
+    assert.deepEqual(context.calls[0].options, { channelId: '345678901234567890' });
+    context.calls[0].onRedeemed(); context.calls[0].onRedeemed(); context.calls[0].resolve(); await settle();
     assert.equal(context.events.length, 1); assert.equal(context.events[0].kind, 'claimed');
     assert.equal(context.events[0].discordUserId, user); assert.equal(context.events[0].code, undefined);
     plugin.flux.MESSAGE_CREATE({ message: message('discord.gift/qrstuvwxyzABCDEF') });
-    context.calls[1].onError(new Error('invalid')); await settle(); assert.equal(context.events.length, 1); plugin.stop();
+    const error = new Error('invalid');
+    context.calls[1].onError(error); context.calls[1].reject(error); await settle(); assert.equal(context.events.length, 1); plugin.stop();
+});
+
+test('integration notifies once on Promise success without onRedeemed', async () => {
+    reset();
+    try {
+        plugin.flux.MESSAGE_CREATE({ message: message('discord.gift/promisesuccessAB') });
+        await settle(); assert.equal(context.events.length, 0);
+        context.calls[0].resolve(); await settle();
+        assert.equal(context.events.length, 1);
+        context.calls[0].onRedeemed(); context.calls[0].onError({ status: 503 }); await settle();
+        assert.equal(context.events.length, 1);
+    } finally { plugin.stop(); }
 });
 test('ignores own/history messages and stopping suppresses late callbacks', async () => {
     reset();

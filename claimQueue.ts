@@ -12,12 +12,13 @@ interface SeenClaim { time: number; attempts: number; retryAt?: number; }
 
 function retryDelay(error: unknown): number | undefined {
     if (!error || typeof error !== "object") return;
-    const { status, code, body } = error as { status?: unknown; code?: unknown; body?: { retry_after?: unknown; }; };
+    const { status, code, retryAfter, body } = error as { status?: unknown; code?: unknown; retryAfter?: unknown; body?: { retry_after?: unknown; }; };
     // Unknown outcomes and Discord's permanent API errors remain deduplicated.
-    if (typeof code === "number" || (typeof status === "number" && status >= 400 && status < 500 && status !== 429)) return;
+    if (typeof status === "number" && status >= 400 && status < 500 && status !== 429) return;
     const transport = typeof code === "string" && ["ECONNRESET", "ETIMEDOUT", "ENETUNREACH", "ECONNREFUSED", "EAI_AGAIN"].includes(code);
     if (!(status === 429 || (typeof status === "number" && status >= 500 && status <= 599) || transport)) return;
-    const seconds = body?.retry_after;
+    // Discord's BillingError.retryAfter and HTTP response body.retry_after are both seconds.
+    const seconds = typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : body?.retry_after;
     return typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0
         ? Math.max(5000, Math.min(86_400_000, seconds * 1000)) : 5000;
 }
@@ -38,7 +39,7 @@ export class ClaimQueue {
     private dispatched?: DispatchedClaim;
 
     constructor(
-        private redeem: (request: ClaimRequest, success: () => void, failure: (error: unknown) => void) => unknown,
+        private redeem: (request: ClaimRequest, success: () => void, failure: (error: unknown) => void) => PromiseLike<unknown> | void,
         private completed: (request: ClaimRequest, success: boolean, error?: unknown) => void,
         private stalled: () => void,
         private timeoutMs = 120_000
@@ -113,7 +114,10 @@ export class ClaimQueue {
         this.armWarning(claim);
         try {
             const result = this.redeem(request, () => finish(true), error => finish(false, error));
-            void Promise.resolve(result).catch(error => finish(false, error));
+            // Callback-only adapters must keep the lock; Discord's Promise resolves after redemption succeeds.
+            if (result && typeof result.then === "function") {
+                void Promise.resolve(result).then(() => finish(true), error => finish(false, error));
+            }
         } catch (error) { finish(false, error); }
     }
 }

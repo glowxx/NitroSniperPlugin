@@ -38,7 +38,7 @@ test('formatting support never turns hostile hosts or invalid gift paths into va
     }
 });
 
-for (const error of [{ status: 429 }, { status: 500 }, { status: 503 }, { status: 599 }, { code: 'ECONNRESET' }, { code: 'ETIMEDOUT' }, { code: 'EAI_AGAIN' }]) {
+for (const error of [{ status: 429 }, { status: 500 }, { status: 503 }, { status: 599 }, { status: 429, code: -1 }, { status: 500, code: -1 }, { status: 503, code: -1 }, { status: 429, code: 20028 }, { code: 'ECONNRESET' }, { code: 'ETIMEDOUT' }, { code: 'ENETUNREACH' }, { code: 'ECONNREFUSED' }, { code: 'EAI_AGAIN' }]) {
     test(`a new link can retry a confirmed transient failure ${JSON.stringify(error)} after cooldown`, t => {
         let now = 1_000;
         t.mock.method(Date, 'now', () => now);
@@ -105,7 +105,7 @@ test('failed claims never automatically retry when time advances without a newly
 test('permanent and unknown failures stay deduplicated even after the retry cooldown', t => {
     let now = 1_000;
     t.mock.method(Date, 'now', () => now);
-    const errors = [{ status: 400, code: 10038 }, { code: 10038 }, { status: 403 }, { status: '503' }, { status: 600 }, new Error('network timeout'), {}, undefined];
+    const errors = [{ status: 400, code: 10038 }, { code: 10038 }, { code: -1 }, { status: 400, code: -1 }, { status: 403 }, { status: 404, code: 10038 }, { status: 403, code: 'ECONNRESET' }, { status: 400, body: { captcha_key: ['challenge required'] } }, { status: '503' }, { status: 600 }, new Error('network timeout'), {}, undefined];
     for (const error of errors) {
         const calls = [];
         const queue = new ClaimQueue((r, ok, fail) => { calls.push({ r, ok, fail }); }, () => {}, () => {});
@@ -222,4 +222,117 @@ test('nested wrappers preserve whole links and mismatched wrappers do not trunca
     for (const text of [`**https://discord.gift/${code}_**`, `||https://discord.gift/${code}extra_extra||`]) {
         assert.deepEqual(extractGiftCodes(text), []);
     }
+});
+
+for (const [name, fields, delay] of [
+    ['BillingError retryAfter in seconds', { retryAfter: 30 }, 30_000],
+    ['fractional seconds', { retryAfter: 6.25 }, 6250],
+    ['raw response body in seconds', { body: { retry_after: 30 } }, 30_000],
+    ['normalized value takes precedence', { retryAfter: 30, body: { retry_after: 10 } }, 30_000],
+    ['invalid normalized value falls back to body', { retryAfter: NaN, body: { retry_after: 10 } }, 10_000],
+    ['minimum delay', { retryAfter: 0.1 }, 5000],
+    ['maximum delay', { retryAfter: 100_000 }, 86_400_000],
+    ...[0, -1, Infinity, NaN, '30'].map(retryAfter => [`invalid delay ${retryAfter}`, { retryAfter }, 5000])
+]) {
+    test(`429 with fallback code respects ${name}`, t => {
+        let now = 1000;
+        t.mock.method(Date, 'now', () => now);
+        const calls = [];
+        const queue = new ClaimQueue((r, ok, fail) => { calls.push({ ok, fail }); }, () => {}, () => {});
+        try {
+            queue.start(); queue.enqueue(request);
+            calls[0].fail({ status: 429, code: -1, ...fields });
+            now += delay - 1;
+            assert.equal(queue.enqueue(request), false);
+            now++;
+            assert.equal(queue.enqueue(request), true);
+            assert.equal(calls.length, 2);
+            calls[1].ok();
+        } finally { queue.stop(); }
+    });
+}
+
+test('Promise success without a callback completes once; late callbacks cannot release the next claim', async () => {
+    const calls = [], completed = [];
+    const queue = new ClaimQueue((r, ok, fail) => new Promise((resolve, reject) => {
+        calls.push({ ok, fail, resolve, reject });
+    }), (r, success) => completed.push([r.code, success]), () => {});
+    try {
+        queue.start(); queue.enqueue(request); queue.enqueue({ ...request, code: otherCode });
+        assert.equal(calls.length, 1);
+        calls[0].resolve({ code, entitlement: {} });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(completed, [[code, true]]);
+        assert.equal(calls.length, 2);
+        calls[0].ok(); calls[0].fail({ status: 503 });
+        assert.deepEqual(completed, [[code, true]]);
+        assert.equal(queue.enqueue({ ...request, code: 'thirdgiftcodeABC' }), true);
+        assert.equal(calls.length, 2, 'old callbacks must not release the second claim');
+        calls[1].resolve();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(calls.length, 3);
+        calls[2].ok();
+        assert.deepEqual(completed, [[code, true], [otherCode, true], ['thirdgiftcodeABC', true]]);
+    } finally { queue.stop(); }
+});
+
+for (const success of [true, false]) {
+    test(`callback ${success ? 'success + Promise resolution' : 'failure + Promise rejection'} completes exactly once`, async () => {
+        const calls = [], completed = [];
+        const queue = new ClaimQueue((r, ok, fail) => new Promise((resolve, reject) => {
+            calls.push({ ok, fail, resolve, reject });
+        }), (r, result) => completed.push(result), () => {});
+        try {
+            queue.start(); queue.enqueue(request); queue.enqueue({ ...request, code: otherCode });
+            if (success) { calls[0].ok(); calls[0].resolve(); }
+            else { const error = { status: 503, code: -1 }; calls[0].fail(error); calls[0].reject(error); }
+            await new Promise(resolve => setImmediate(resolve));
+            calls[0].ok(); calls[0].fail({ status: 503 });
+            assert.deepEqual(completed, [success]);
+            assert.equal(calls.length, 2);
+            queue.enqueue({ ...request, code: 'thirdgiftcodeABC' });
+            assert.equal(calls.length, 2, 'the second claim still holds the lock');
+            calls[1].ok(); calls[2].ok();
+            assert.deepEqual(completed, [success, true, true]);
+        } finally { queue.stop(); }
+    });
+}
+
+test('an unresolved Promise keeps CAPTCHA serialization across warnings and account restart', async () => {
+    const calls = [], completed = []; let stalled = 0;
+    const queue = new ClaimQueue((r, ok, fail) => new Promise(resolve => {
+        calls.push({ ok, fail, resolve });
+    }), (r, success) => completed.push([r.claimantId, success]), () => stalled++, 10);
+    try {
+        queue.start(); queue.enqueue(request);
+        await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(stalled, 1);
+        queue.stop(); queue.start();
+        queue.enqueue({ code: otherCode, claimantId: secondUser });
+        await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(calls.length, 1);
+        assert.deepEqual(completed, []);
+        calls[0].resolve();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(calls.length, 2);
+        assert.deepEqual(completed, [], 'stale Promise success must not notify');
+        calls[0].ok(); calls[0].fail({ status: 503 });
+        assert.deepEqual(completed, []);
+        calls[1].resolve();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(completed, [[secondUser, true]]);
+    } finally { queue.stop(); }
+});
+
+test('callback-only adapters returning undefined do not finish on a microtask', async () => {
+    const calls = [], completed = [];
+    const queue = new ClaimQueue((r, ok, fail) => { calls.push({ ok, fail }); }, (r, success) => completed.push(success), () => {});
+    try {
+        queue.start(); queue.enqueue(request); queue.enqueue({ ...request, code: otherCode });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(calls.length, 1);
+        assert.deepEqual(completed, []);
+        calls[0].ok(); calls[1].ok();
+        assert.deepEqual(completed, [true, true]);
+    } finally { queue.stop(); }
 });

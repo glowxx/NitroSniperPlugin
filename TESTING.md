@@ -1,5 +1,30 @@
 # Verification
 
+## Gift redemption compatibility — 2026-10-14
+
+Source inspection used Discord Stable build **637268**, version hash `a935e483c18dcf082c62ce19bc9e3560fce10581`, obtained from the public [app page](https://discord.com/app). These are client implementation observations, not a documented stable API contract.
+
+- [Main client bundle](https://discord.com/assets/web.94f77ed563542b5d.js), module **75255**: `redeemGiftCode` is async; accepts `code`, `options.channelId`, optional `options.paymentSource`, `onRedeemed`, `onError`; awaits the internal HTTP POST with `channel_id`; dispatches success and invokes `onRedeemed` before returning the result. On failure it constructs a BillingError, dispatches failure, invokes `onError`, and throws the same error. There is no successful failure return in this implementation.
+- [Native gift modal chunk](https://discord.com/assets/723a4d63ad1ef195.js), module **361845**: the accept handler awaits redemption with `options.channelId` from `channelContext`. The open handler changes local presentation state. Channel context is optional, including gifts opened outside a channel; this does not prove that every native redemption carries a non-null channel ID.
+- Main bundle modules **913122 → 136857 → 178253 → 636537**: the action's BillingError inherits the API error fields `status`, `code`, `retryAfter`, `fields`, `message`, and `error`. The API error wrapper supplies fallback `code: -1` and copies `body.retry_after` to `retryAfter` when parsing a normal message body. It does not preserve the original `body` or a raw transport error's string `code`.
+- Main bundle module **636537**: HTTPResponseError can retain `body`, `status`, and `retryAfter`; the HTTP layer parses the retry header/body in seconds and multiplies by 1000 when scheduling its cooldown. BillingError copies the body value without conversion. Discord's [rate-limit documentation](https://docs.discord.com/developers/topics/rate-limits) independently specifies seconds, including fractional values, for `retry_after`. Other unrelated client objects also use the name `retryAfter` for milliseconds/timestamps; this queue handles the verified gift action error contract.
+- Executing the downloaded gift action and actual BillingError/APIError constructors in an isolated Node VM with stubbed HTTP/Flux/localization verified channel forwarding, Promise/callback success, and identical callback/rejected errors for HTTP 429 and 503 with `code: -1`, `retryAfter: 30`. No account, real gift, redemption HTTP request, or CAPTCHA was used.
+
+The old numeric-code early return rejected both verified transient error shapes. The fix preserves explicit HTTP 4xx failures other than 429 and unknown outcomes as non-retryable. Known transport codes are retryable only when actually exposed; the plugin does not infer or unwrap missing transport information from BillingError.
+
+Regression coverage includes normalized/raw retry delays and bounds, numeric fallback codes on transient HTTP statuses, real numeric rate-limit codes, permanent/CAPTCHA/unknown errors, Promise-only success, duplicate success/failure completion, stale callbacks/Promise settlement, callback-only adapters, account restart, and unresolved claim serialization. The integration mock now uses a controlled Promise matching Discord's actual settlement timing; the old immediately resolved mock incorrectly modeled a still-pending redemption as success.
+
+Verification on Node.js **24.19.0**:
+
+- Baseline: 136/136 tests passed outside the Windows sandbox. The restricted run failed five existing tests because localhost connections or temporary filesystem operations were denied; `npm run check` passed there.
+- Regression-first focused run failed before the implementation; the corrected focused suite passed **73/73**, also independently repeated by the scoped reviewer. Final `npm test`: **160/160 passed**, no skipped tests. `npm run check` passed after the code change.
+- Strict standalone TypeScript checking of `claimQueue.ts` and `types.ts` passed with the installed TypeScript compiler. No new dependency or suppression was added.
+- In a disposable clean copy of installed Equicord commit `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4`, with this plugin and existing host dependencies, the standalone desktop/Equibop build passed. Host ESLint passed for the two changed TypeScript files using the previously documented `simple-header/header: off` exception to retain MIT attribution.
+- Full Equicord `tsc --noEmit` failed with **seven TS2339 errors**: `Toasts.Type` is absent from this newer host's `Toasts` type (`directBotPanel.tsx`, `index.tsx`, `settings.tsx`). Repeating against the starting plugin sources produced identical diagnostics. This pre-existing host incompatibility is outside this focused redemption fix; it was not suppressed or changed. The user's existing Equicord checkout was not modified.
+- A separate Vencord checkout and the historical pinned host installations were unavailable; their full type/build checks were not rerun. No authenticated client was exercised. Final diff inspection and a separate focused review found no additional required changes.
+
+Passing channel context matches the observed native call more closely. There is no evidence here that it reduces CAPTCHA frequency. Live authenticated redemption and actual CAPTCHA presentation remain untested; the native action and protection handling remain in control.
+
 ## Direct bot-token setup — 2026-10-10
 
 - All 136 tests pass on Node.js 24.19.0 and 22.13.0, including four atomic-disconnect regressions and thirteen direct-mode tests.
@@ -88,7 +113,7 @@ No Discord bot credentials or authenticated desktop Discord instance were availa
 1. Register `/notifications` with the real bot and verify link/test/status/disconnect in Discord.
 2. Build/restart the actual Vencord/Equicord client and visually inspect the panel (password masking, enabled/disabled state, keyboard navigation and buttons).
 3. Run Send Test DM with DMs allowed, then with the bot blocked; inspect both plugin and slash-command status.
-4. With an authorized gift on your own test account, verify that only Discord's successful redemption callback triggers a DM. Verify the CAPTCHA/modal behaviour without bypassing it.
+4. With an authorized gift on your own test account, verify that a successful Discord callback or redemption Promise settlement triggers exactly one claim notification. Verify the CAPTCHA/modal behaviour without bypassing it.
 5. Restart the bot during queued delivery, switch client accounts, and test the deployed HTTPS proxy.
 
 The internal Discord action is discovered by name at runtime; future Discord updates can change it even when TypeScript and bundling pass. A successful mock integration does not prove live Discord compatibility or real delivery. DM delivery also depends on the recipient's privacy settings and bot access. See README for limits and recovery actions.

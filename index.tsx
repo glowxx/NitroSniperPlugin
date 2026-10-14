@@ -66,7 +66,7 @@ async function notify(request: ClaimRequest, success: boolean, userId: string, g
 const queue = new ClaimQueue(
     (request, onRedeemed, onError) => {
         if (request.claimantId !== UserStore.getCurrentUser()?.id) return onError(new Error("Discord account changed."));
-        return GiftActions.redeemGiftCode({ code: request.code, onRedeemed, onError });
+        return GiftActions.redeemGiftCode({ code: request.code, options: { channelId: request.channelId }, onRedeemed, onError });
     },
     (request, success) => {
         logger.log(success ? "Gift successfully redeemed" : "Gift redemption failed");
