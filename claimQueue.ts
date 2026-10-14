@@ -1,14 +1,52 @@
 import type { ClaimRequest } from "./types";
 
+function closingBracket(text: string, start: number, open: string, close: string): number {
+    let depth = 0;
+    for (let index = start; index < text.length; index++) {
+        if (text[index] === "\\") { index++; continue; }
+        if (text[index] === open) depth++;
+        else if (text[index] === close && --depth === 0) return index;
+    }
+    return -1;
+}
+function maskedLink(text: string, start = 0) {
+    if (text[start] !== "[") return;
+    const labelEnd = closingBracket(text, start, "[", "]");
+    if (labelEnd < 0 || text[labelEnd + 1] !== "(") return;
+    const destinationEnd = closingBracket(text, labelEnd + 1, "(", ")");
+    return { destination: text.slice(labelEnd + 2, destinationEnd < 0 ? text.length : destinationEnd),
+        end: destinationEnd < 0 ? text.length : destinationEnd + 1, closed: destinationEnd >= 0 };
+}
+function* giftCandidates(content: string) {
+    const whitespace = (char: string) => char !== "\uFEFF" && /\s/.test(char);
+    for (let index = 0; index < content.length;) {
+        if (whitespace(content[index])) { index++; continue; }
+        const start = index;
+        while (index < content.length && !whitespace(content[index])) {
+            // Keep labels/destinations together, even inside hostile outer URLs; never emit their substrings.
+            const link = content[index] === "[" ? maskedLink(content, index) : undefined;
+            index = link ? link.end : index + 1;
+        }
+        yield content.slice(start, index);
+    }
+}
+
 export function extractGiftCodes(content: string): string[] {
     const codes = new Set<string>();
-    // Keep a complete whitespace-delimited candidate, including any nested URL in its path/query.
+    // Keep complete candidates, including any nested URL in their path/query or Markdown label.
     // U+FEFF is JavaScript whitespace but an invisible URL modification, not a candidate boundary.
-    for (const token of content.match(/(?:\S|\uFEFF)+/g) ?? []) {
+    for (const token of giftCandidates(content)) {
         let candidate = token.replace(/[.,!?]+$/, "");
         // Strip only paired OUTER formatting; never search inside an unrelated URL or malformed wrapper.
         const closing: Record<string, string> = { "(": ")", "[": "]", "{": "}", "<": ">", '"': '"', "'": "'", "*": "*", "_": "_", "~": "~", "|": "|", "`": "`" };
         while (candidate.length > 1 && closing[candidate[0]] === candidate.at(-1)) candidate = candidate.slice(1, -1);
+        if (candidate.startsWith("[")) {
+            const link = maskedLink(candidate);
+            if (!link?.closed || link.end !== candidate.length) continue;
+            // The visible label is never a URL. Only an absolute HTTP(S) destination can identify a gift host.
+            candidate = link.destination.replace(/^[ \t]+|[ \t]+$/g, "");
+            if (!/^https?:\/\//i.test(candidate)) continue;
+        }
         // Validate the raw spelling before URL normalization (userinfo, Unicode, backslashes, dot segments).
         if (/[^\x21-\x7e]/.test(candidate)) continue;
         const match = /^(https?:\/\/)?(discord\.gift|discord(?:app)?\.com)(\/[^?#]*)(?:\?[^#]*)?(?:#.*)?$/i.exec(candidate);

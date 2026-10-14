@@ -1,5 +1,16 @@
 # Verification
 
+## Masked gift link correction — 2026-10-15
+
+Starting at `5b3b5ac7079752e111315be712cd495f5bfdb773`, all three `[Nitro](https://discord.gift/CODE)`, `discord.com/gifts` and `discordapp.com/gifts` masked-link regressions failed with an empty result. The whitespace tokenizer also incorrectly exposed gift URLs inside a spaced visible label or malformed spaced destination. The correction keeps complete Markdown candidates together, handles balanced/escaped brackets and parentheses, ignores labels and passes only a complete absolute HTTP(S) destination through the unchanged strict host/path validation. Whole hostile outer URLs are never searched for gift substrings. Syntax references: [Discord masked links](https://support.discord.com/hc/en-us/articles/210298617-Markdown-Text-101-Chat-Formatting-Bold-Italic-Underline) and [CommonMark inline links](https://spec.commonmark.org/0.31.2/#inline-links).
+
+- `node --test tests/parser-hardening.test.mjs`: FAILED before correction (5/12), then PASSED **12/12**, including all prior adversarial cases plus three masked-host reproductions, case/query/fragment/paired wrappers, spaced/Unicode/nested/escaped labels, independent links, deduplication, hostile destinations/suffixes and malformed structure.
+- `node --test tests/claims.test.mjs tests/claim-recovery.test.mjs tests/claim-backpressure.test.mjs`: PASSED **67/67**.
+- `npm test`: PASSED **262/262**, none skipped, on Node 24.19.0 with approved localhost access and workspace TEMP/TMP.
+- `npm run check` and `git diff --check`: PASSED.
+
+No live Discord claims/CAPTCHA tests or unrelated production changes were made. The existing red Actions run had no executed steps and is not evidence of a source/test failure; no production workaround or workflow rerun was made in response. The new head's workflow state is reported separately after push.
+
 ## Cleanup deadline correction — 2026-10-14
 
 The correction above `25efe176fccd43499718688673d929907f673346` preserves the authoritative local delivery deadline. Normal disconnect with pending tests retains the encrypted connection and reports a pending count; the separately warned force action removes it without issuing DELETE. Different-bot replacement no longer drains tests. A blocked normal disconnect also preserves unrelated in-flight CLAIM delivery.
