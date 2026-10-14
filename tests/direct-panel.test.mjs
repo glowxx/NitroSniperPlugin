@@ -92,3 +92,30 @@ test('disconnect finishing after an account switch disables only its original ow
     assert.equal(enabled(user), false); assert.equal(enabled(globalThis.nsPanel.user), false);
     assert.deepEqual(JSON.parse(globalThis.nsPanel.settings.botDirectAccounts), {});
 });
+
+test('blocked normal disconnect retains metadata/settings and offers explicitly warned force removal', async () => {
+    reset(); let tree = render(); input(tree).props.onChange({ currentTarget: { value: token } }); tree = render();
+    await button(tree, 'Connect bot').props.onClick(); tree = render();
+    const calls = [];
+    globalThis.VencordNative.pluginHelpers.NitroSniper.disconnectDirectBot = async (owner, force) => {
+        calls.push([owner, force]);
+        return force ? { disconnected: true, warning: 'Pending test DMs may remain in Discord.' }
+            : { disconnected: false, pendingCleanup: 2, warning: 'There are 2 temporary test messages waiting for automatic deletion. Force disconnect may leave them in Discord.' };
+    };
+    assert.equal(button(tree, 'Force disconnect — test DMs may remain'), undefined);
+    await button(tree, 'Disconnect').props.onClick(); tree = render();
+    assert.equal(enabled(user), true); assert.equal(JSON.parse(globalThis.nsPanel.settings.botDirectAccounts)[user].botId, info.botId);
+    assert.ok(nodes(tree).some(node => node.props?.role === 'alert' && /2 temporary/.test(node.props.children)));
+    await button(tree, 'Force disconnect — test DMs may remain').props.onClick(); tree = render();
+    assert.deepEqual(calls, [[user, false], [user, true]]); assert.equal(enabled(user), false);
+    assert.deepEqual(JSON.parse(globalThis.nsPanel.settings.botDirectAccounts), {});
+});
+
+test('pending-disconnect force consent belongs only to the account that received the warning', async () => {
+    reset(); globalThis.nsPanel.settings.botDirectAccounts = JSON.stringify({ [user]: info });
+    globalThis.VencordNative.pluginHelpers.NitroSniper.disconnectDirectBot = async () => ({ disconnected: false, pendingCleanup: 1, warning: 'A temporary test remains. Force disconnect may leave it in Discord.' });
+    let tree = render(); await button(tree, 'Disconnect').props.onClick(); tree = render();
+    const force = button(tree, 'Force disconnect — test DMs may remain'); assert.ok(force);
+    globalThis.nsPanel.user = '345678901234567890'; tree = render();
+    assert.equal(button(tree, 'Force disconnect — test DMs may remain'), undefined);
+});

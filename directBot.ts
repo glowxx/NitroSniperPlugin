@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import type { NativeWebhookResponse } from "./types";
 
 export interface BotConnection { credentialId: string; botId: string; botName: string; warning?: string; }
+export interface BotDisconnectResult { disconnected: boolean; pendingCleanup?: number; warning?: string; }
 interface Credential extends BotConnection { token: string; }
 interface Vault {
     get(userId: string): Promise<Credential | null>;
@@ -88,6 +89,8 @@ export function createDirectBot(vault: Vault, request = discordRequest, options:
         timer.unref?.();
     }
     async function deleteJob(job: TestCleanupJob, value: Credential, signal?: AbortSignal) {
+        // Recheck after asynchronous credential lookup: the wall clock may have moved backwards.
+        if (job.deleteAt > now()) return;
         if ((authorizationCooldowns.get(value.botId) ?? 0) > now()) return { status: 401, body: {} };
         const wait = (cooldowns.get(value.botId) ?? 0) - now();
         if (wait > 0) return { status: 429, body: { retry_after: wait / 1000 } };
@@ -121,7 +124,10 @@ export function createDirectBot(vault: Vault, request = discordRequest, options:
             }
             const controller = new AbortController();
             cleanupController = { userId: job.userId, controller };
-            try { await updateJob(job, await deleteJob(job, value, controller.signal)); }
+            try {
+                const reply = await deleteJob(job, value, controller.signal);
+                if (reply) await updateJob(job, reply);
+            }
             finally { cleanupController = undefined; }
             if (controller.signal.aborted) break;
         }
@@ -138,28 +144,6 @@ export function createDirectBot(vault: Vault, request = discordRequest, options:
             }
             finally { schedule(); }
         });
-    }
-    async function pendingWarning(userId: string, old?: Credential | null) {
-        const pending = (await loadJobs()).filter(job => job.userId === userId);
-        if (!pending.length) return undefined;
-        // Deliberate revocation may delete temporary tests early. One shared deadline bounds this drain.
-        const deadline = now() + 3000;
-        const signal = AbortSignal.timeout(3000);
-        for (const job of pending) {
-            if (now() >= deadline || signal.aborted) break;
-            if (old?.botId === job.botId) {
-                let cancel: (() => void) | undefined;
-                const aborted = new Promise<Reply>(resolve => {
-                    cancel = () => resolve({ status: -1, body: {} });
-                    signal.addEventListener("abort", cancel, { once: true });
-                });
-                const reply = await Promise.race([deleteJob(job, old, signal), aborted]);
-                if (cancel) signal.removeEventListener("abort", cancel);
-                await updateJob(job, reply);
-            }
-        }
-        schedule();
-        return (await loadJobs()).some(job => job.userId === userId) ? CLEANUP_WARNING : undefined;
     }
     function retrySeconds(reply: Reply) {
         return typeof reply.body?.retry_after === "number" && Number.isFinite(reply.body.retry_after)
@@ -207,7 +191,7 @@ export function createDirectBot(vault: Vault, request = discordRequest, options:
                 const old = await vault.get(userId);
                 abort(userId);
                 let warning: string | undefined;
-                if (old && old.botId !== value.botId) warning = await pendingWarning(userId, old);
+                if (old && old.botId !== value.botId && (await loadJobs()).some(job => job.userId === userId)) warning = CLEANUP_WARNING;
                 await vault.set(userId, value);
                 authorizationCooldowns.delete(value.botId);
                 // A replacement token for the same bot can resume its original jobs immediately.
@@ -216,17 +200,25 @@ export function createDirectBot(vault: Vault, request = discordRequest, options:
                 return { ...publicInfo(value), ...(warning ? { warning } : {}) };
             });
         },
-        disconnect(userId: string) {
+        disconnect(userId: string, force = false): Promise<BotDisconnectResult> {
             if (!validUser(userId)) throw new Error("Sign in to Discord first.");
-            // Stop an existing request immediately, without waiting for a pending token verification.
-            abort(userId);
+            if (typeof force !== "boolean") throw new Error("Invalid disconnect request.");
+            // A blocked normal disconnect keeps deliveries active; only explicit force revokes immediately.
+            if (force) abort(userId);
             return serial(async () => {
-                let old: Credential | null = null;
-                try { old = await vault.get(userId); } catch { /* Ciphertext deletion does not require decryption. */ }
                 let warning: string | undefined;
-                try { warning = await pendingWarning(userId, old); } catch { warning = CLEANUP_WARNING; }
+                let pendingCleanup: number | undefined;
+                try { pendingCleanup = (await loadJobs()).filter(job => job.userId === userId).length; }
+                catch { warning = "Could not read pending test-message cleanup. Disconnect was not completed. Force disconnect may leave temporary test messages in Discord."; }
+                if (!force && (pendingCleanup || warning)) {
+                    schedule();
+                    return { disconnected: false, pendingCleanup, warning: warning ?? `There are ${pendingCleanup} temporary test message(s) waiting for automatic deletion after their 30-second lifetime. Cleanup requires the original bot credential. Disconnect after cleanup completes, or force disconnect knowing these messages may remain in Discord.` };
+                }
+                if (pendingCleanup || warning) warning = CLEANUP_WARNING;
+                // Opaque removal needs no decryption. Neither normal nor forced removal issues DELETE.
                 await vault.remove(userId); abort(userId);
-                return warning ? { warning } : {};
+                schedule();
+                return { disconnected: true, ...(warning ? { warning } : {}) };
             });
         },
         recover(userId: string) {
@@ -341,8 +333,9 @@ export function diskCleanupStore(pathForStore?: () => Promise<string>): TestClea
     });
     const valid = (job: any): job is TestCleanupJob => job && typeof job === "object"
         && [job.userId, job.botId, job.channelId, job.messageId].every(validUser)
-        && Number.isSafeInteger(job.deleteAt) && job.deleteAt > 0 && job.deleteAt <= Date.now() + 330_000
-        && Number.isSafeInteger(job.nextAttemptAt) && job.nextAttemptAt > 0 && job.nextAttemptAt <= Math.max(job.deleteAt, Date.now()) + 86_400_000
+        // Absolute deadlines remain valid if the wall clock moves backwards before restart.
+        && Number.isSafeInteger(job.deleteAt) && job.deleteAt > 0 && job.deleteAt <= 8_640_000_000_000_000
+        && Number.isSafeInteger(job.nextAttemptAt) && job.nextAttemptAt > 0 && job.nextAttemptAt <= 8_640_000_000_000_000
         && Number.isInteger(job.attempts) && job.attempts >= 0 && job.attempts <= 20;
     const normalize = (jobs: TestCleanupJob[]) => jobs.map(({ userId, botId, channelId, messageId, deleteAt, nextAttemptAt, attempts }) =>
         ({ userId, botId, channelId, messageId, deleteAt, nextAttemptAt, attempts }));

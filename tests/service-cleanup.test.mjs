@@ -165,10 +165,12 @@ test('same-bot token rotation remains eligible; an unrelated replacement bot nev
 
 test('disconnect revokes service consent but bot-owned cleanup continues without any plaintext token retention', async t => {
     const f = fixture(t, { persisted: true });
-    f.enqueue(); await f.service.deliverDue(); f.service.disconnect(userId);
+    f.enqueue(); await f.service.deliverDue(); f.advance(10_000); f.service.disconnect(userId);
     assert.equal(f.service.status(userId).linked, false);
     assert.deepEqual(Object.keys(f.pending()[0]).sort(), ['attempts', 'bot_id', 'channel_id', 'delete_at', 'error', 'event_id', 'message_id', 'next_at', 'user_id']);
-    f.restart(); f.advance(30_000); await f.service.deliverDue();
+    f.restart(); await f.service.deliverDue(); assert.deepEqual(f.deleted, []);
+    f.advance(19_999); await f.service.deliverDue(); assert.deepEqual(f.deleted, []);
+    f.advance(1); await f.service.deliverDue();
     assert.deepEqual(f.deleted, [messageId]);
 });
 
@@ -230,6 +232,7 @@ test('test cleanup capacity rejects another test before sending while real claim
 });
 
 test('service SDK adapter records only returned message identity and calls official DELETE with matching bot', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: started + 123_456 });
     const client = new Client({ intents: [] }); t.after(() => client.destroy());
     client.user = { id: botId };
     const user = new User(client, { id: userId, username: 'recipient', discriminator: '0', avatar: null });
@@ -240,7 +243,7 @@ test('service SDK adapter records only returned message identity and calls offic
         return { id: messageId, channel_id: channelId, author: { id: botId }, timestamp: new Date(started).toISOString() };
     };
     const receipt = await createDMSender(client)(userId, { content: 'test' }, () => true);
-    assert.deepEqual(receipt, { channelId, messageId, botId, createdAt: started });
+    assert.deepEqual(receipt, { channelId, messageId, botId, createdAt: started + 123_456 });
     const deleted = [];
     client.rest.delete = async (route, options) => { deleted.push(route); assert.equal(options.signal.aborted, false); };
     const remove = createTestDMDeleter(client);
@@ -249,6 +252,39 @@ test('service SDK adapter records only returned message identity and calls offic
     assert.deepEqual(deleted, [Routes.channelMessage(channelId, messageId)]);
     await assert.rejects(remove({ ...job, bot_id: '789012345678901234' }, () => true), { status: 403 });
     assert.equal(deleted.length, 1);
+});
+
+test('a future Discord timestamp cannot extend the local thirty-second service lifetime', async t => {
+    const f = fixture(t, { send: async () => ({ botId, channelId, messageId, createdAt: started + 300_000 }) });
+    f.enqueue(); await f.service.deliverDue();
+    assert.equal(f.pending()[0].delete_at, started + 30_000);
+    f.advance(29_999); await f.service.deliverDue(); assert.deepEqual(f.deleted, []);
+    f.advance(1); await f.service.deliverDue(); assert.deepEqual(f.deleted, [messageId]);
+});
+
+test('service restart after a backwards clock change preserves valid jobs and waits for delete_at', async t => {
+    const f = fixture(t, { persisted: true }); f.enqueue(); await f.service.deliverDue();
+    f.advance(-600_000); f.restart();
+    assert.equal(f.pending().length, 1); assert.equal(f.pending()[0].delete_at, started + 30_000);
+    await f.service.deliverDue(); assert.deepEqual(f.deleted, []);
+    f.advance(629_999); await f.service.deliverDue(); assert.deepEqual(f.deleted, []);
+    f.advance(1); await f.service.deliverDue(); assert.deepEqual(f.deleted, [messageId]);
+});
+
+test('service cleanup commit failure never publishes delivered status after a successful POST', async t => {
+    const f = fixture(t); f.enqueue();
+    f.service.db.exec("CREATE TRIGGER reject_cleanup BEFORE INSERT ON test_cleanups BEGIN SELECT RAISE(ABORT,'private disk failure'); END;");
+    await f.service.deliverDue();
+    assert.equal(f.sent.length, 1); assert.equal(f.pending().length, 0);
+    assert.equal(f.service.status(userId).latest.state, 'queued');
+    assert.match(f.service.status(userId).latest.error, /test.*sent.*automatic deletion/i);
+    assert.equal(f.service.status(userId).latest.error.includes('private disk'), false);
+});
+
+test('service forward clock jump performs overdue cleanup once and keeps no due retry loop', async t => {
+    const f = fixture(t); f.enqueue(); await f.service.deliverDue();
+    f.advance(600_000); await f.service.deliverDue(); await f.service.deliverDue();
+    assert.deepEqual(f.deleted, [messageId]); assert.equal(f.pending().length, 0);
 });
 
 test('SDK success received during shutdown remains durable for test cleanup', async t => {

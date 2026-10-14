@@ -220,7 +220,7 @@ export class NotificationService {
                     && this.now() - Date.parse(payload.occurredAt) < DAY
                     && this.db.prepare('SELECT state FROM events WHERE user_id=? AND event_id=?').get(row.user_id, row.event_id)?.state === 'queued';
                 if (!canSend()) continue;
-                let state = 'delivered', error = null, nextAt = now;
+                let state = 'delivered', error = null, nextAt = now, testCreated = false;
                 const controller = new AbortController();
                 this.delivery = { userId: row.user_id, eventId: row.event_id, test: payload.kind === 'test', controller };
                 const deadline = setTimeout(() => controller.abort(), Math.max(1, DAY - (this.now() - Date.parse(payload.occurredAt))));
@@ -229,7 +229,10 @@ export class NotificationService {
                     const receipt = await this.sendDM(row.user_id, buildMessage(payload), canSend, controller.signal, payload.kind);
                     if (receipt === false) continue;
                     if (!this.ownsLease()) { this.loseLease(); break; }
-                    if (payload.kind === 'test') this.#recordTestDelivery(row, receipt);
+                    if (payload.kind === 'test') {
+                        testCreated = true;
+                        this.#recordTestDelivery(row, receipt);
+                    }
                 }
                 catch (err) {
                     const permanent = [50007, 50278, 50013, 10013, 50035].includes(Number(err?.code));
@@ -237,6 +240,7 @@ export class NotificationService {
                     error = [50007, 50278].includes(Number(err?.code)) ? 'Discord cannot deliver this DM. Allow DMs, unblock the bot, then send a new test.'
                         : permanent ? 'Discord rejected this notification. Check the account and bot permissions.'
                         : 'Discord delivery temporarily unavailable.';
+                    if (testCreated) error = 'The test DM was sent, but automatic deletion could not be saved. Delete this test manually if cleanup cannot recover.';
                     if ([50007, 50278, 10013].includes(Number(err?.code))) {
                         this.db.prepare("UPDATE events SET state='failed',error=?,updated_at=? WHERE user_id=? AND state='queued'")
                             .run(error, this.now(), row.user_id);
@@ -256,15 +260,14 @@ export class NotificationService {
     #recordTestDelivery(row, receipt) {
         const now = this.now();
         if (!receipt || ![receipt.channelId, receipt.messageId, receipt.botId].every(id => typeof id === 'string' && snowflake.test(id))
-            || receipt.botId !== this.botId() || !Number.isSafeInteger(receipt.createdAt)
-            || receipt.createdAt > now + 300_000 || receipt.createdAt < now - DAY) {
+            || receipt.botId !== this.botId()) {
             throw new Error('Discord test delivery identity unavailable.');
         }
         // Persist the SDK receipt and completion atomically; a replay uses the same nonce.
         this.db.exec('BEGIN IMMEDIATE');
         try {
-            // Never expire before thirty seconds after delivery, even when server/client clocks differ.
-            const deleteAt = Math.max(receipt.createdAt, now) + TEST_LIFETIME;
+            // Local successful delivery completion is authoritative, never an embed/server timestamp.
+            const deleteAt = now + TEST_LIFETIME;
             this.db.prepare(`INSERT INTO test_cleanups(user_id,event_id,bot_id,channel_id,message_id,delete_at,next_at)
                 VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`).run(row.user_id, row.event_id, receipt.botId, receipt.channelId, receipt.messageId, deleteAt, deleteAt);
             this.db.prepare("UPDATE events SET state='delivered',error=NULL,updated_at=? WHERE user_id=? AND event_id=? AND state='queued'")
@@ -276,8 +279,8 @@ export class NotificationService {
         return [job.user_id, job.bot_id, job.channel_id, job.message_id].every(id => typeof id === 'string' && snowflake.test(id)
                 && BigInt(id) <= 18_446_744_073_709_551_615n)
             && typeof job.event_id === 'string' && /^[A-Za-z0-9_-]{16,80}$/.test(job.event_id)
-            && Number.isSafeInteger(job.delete_at) && job.delete_at >= 0 && job.delete_at <= this.now() + 330_000
-            && Number.isSafeInteger(job.next_at) && job.next_at >= 0 && job.next_at <= Math.max(job.delete_at, this.now()) + DAY
+            && Number.isSafeInteger(job.delete_at) && job.delete_at >= 0 && job.delete_at <= 8_640_000_000_000_000
+            && Number.isSafeInteger(job.next_at) && job.next_at >= 0 && job.next_at <= 8_640_000_000_000_000
             && Number.isSafeInteger(job.attempts) && job.attempts >= 0 && job.attempts <= 1_000_000;
     }
     async #cleanupDue() {
@@ -308,7 +311,7 @@ export class NotificationService {
             timer.unref();
             let complete = false, nextAt, error, botBackoff = false;
             try {
-                const canDelete = () => !this.closed && !this.stopping && this.ownsLease() && job.bot_id === this.botId();
+                const canDelete = () => !this.closed && !this.stopping && this.ownsLease() && job.bot_id === this.botId() && job.delete_at <= this.now();
                 if (await this.deleteTestDM(job, canDelete, controller.signal) === false) continue;
                 complete = true;
             } catch (err) {

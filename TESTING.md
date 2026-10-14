@@ -1,5 +1,13 @@
 # Verification
 
+## Cleanup deadline correction — 2026-10-14
+
+The correction above `25efe176fccd43499718688673d929907f673346` preserves the authoritative local delivery deadline. Normal disconnect with pending tests retains the encrypted connection and reports a pending count; the separately warned force action removes it without issuing DELETE. Different-bot replacement no longer drains tests. A blocked normal disconnect also preserves unrelated in-flight CLAIM delivery.
+
+Final `npm test`: **254/254 passed, none skipped**, on Node 24.19.0 with approved loopback access. Focused cleanup/panel/lifecycle checks passed **64/64**. Fake-clock cases cover 10.000, 29.999 and 30.000 seconds, restart/recovery at 10/20 seconds, overdue restart, rotation, force revocation, account switch, actual plugin stop, clock rewinds/forward jumps and durable-before-success ordering. Service failure after successful POST now reports the cleanup limitation explicitly. No real thirty-second sleeps, Discord credentials, live redemption or CAPTCHA tests were used.
+
+Current Vencord `16ec4ea838899706019e7f472e45f055070abeb1` and Equicord `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4` full type checks passed with TS 6.0.3 and zero diagnostics; both standalone builds passed after the final functional change. Current-host lint for the three changed host-facing files reports only the previously accepted GPL-header/MIT-plugin conflict, three errors per host. No rule or check was suppressed; MIT and attribution remain intact. See [CLEANUP_DEADLINE_VERIFICATION.md](CLEANUP_DEADLINE_VERIFICATION.md) for commands, initial failures, review findings and wall-clock limits. Results below describe earlier phases.
+
 ## Post-audit implementation — 2026-10-14
 
 Baseline: clean `main` at `6b1caa3348ca3a43ecc954204fedfe8a439525c4`; implementation branch `fix/post-audit-hardening`. Node.js 24.19.0. All Discord responses and OS encryption in tests are simulated; no authenticated redemption, real bot credential or CAPTCHA was used.

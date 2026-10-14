@@ -49,7 +49,7 @@ export function createDMSender(client) {
             if (!response || response.channel_id !== channel.id) return undefined;
             return { channelId: response.channel_id, messageId: response.id,
                 botId: response.author?.id ?? client.user?.id,
-                createdAt: response.timestamp ? Date.parse(response.timestamp) : Date.now() };
+                createdAt: Date.now() };
         } catch (error) {
             if (signal?.aborted || !canSend()) return false;
             throw error;

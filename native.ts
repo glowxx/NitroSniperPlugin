@@ -94,8 +94,8 @@ export async function connectDirectBot(_: IpcMainInvokeEvent, userId: string, to
 export async function getDirectBotStatus(_: IpcMainInvokeEvent, userId: string) {
     return directBot.status(userId);
 }
-export async function disconnectDirectBot(_: IpcMainInvokeEvent, userId: string) {
-    return directBot.disconnect(userId);
+export async function disconnectDirectBot(_: IpcMainInvokeEvent, userId: string, force = false) {
+    return directBot.disconnect(userId, force);
 }
 export async function recoverDirectBotVault(_: IpcMainInvokeEvent, userId: string) {
     return directBot.recover(userId);

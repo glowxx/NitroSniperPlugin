@@ -1,5 +1,7 @@
 # Post-audit command and review ledger
 
+Historical first implementation phase. The later correction in [CLEANUP_DEADLINE_VERIFICATION.md](CLEANUP_DEADLINE_VERIFICATION.md) supersedes the early-drain disconnect/replacement behavior described below. Neither path now issues an early DELETE.
+
 Date: 2026-10-14. Existing clean workspace at `6b1caa3348ca3a43ecc954204fedfe8a439525c4`, branch `main`. Work is on `fix/post-audit-hardening`. All implementation changes are being saved in one focused local commit after the user explicitly accepted the stock GPL-header/MIT-plugin lint limitation. No push, merge or PR was authorized or performed.
 
 ## Setup and inspection

@@ -29,6 +29,7 @@ export function DirectBotPanel() {
     const [busy, setBusy] = useState(false);
     const [status, setStatus] = useState(getNotificationStatus);
     const [error, setError] = useState("");
+    const [forceDisconnectOwner, setForceDisconnectOwner] = useState("");
     settings.use(["notificationAccounts", "botDirectAccounts"]);
     const values = accountNotificationSettings(settings.store, userId);
     let savedConnection = false;
@@ -39,7 +40,7 @@ export function DirectBotPanel() {
     useEffect(() => {
         let current = true;
         const expectedRevision = ++revision.current;
-        setToken(""); setBot(null); setError("");
+        setToken(""); setBot(null); setError(""); setForceDisconnectOwner("");
         if (userId) void Promise.resolve().then(() => helper().getDirectBotStatus(userId)).then(value => {
             if (current && expectedRevision === revision.current) { setBot(value); remember(userId, value); if (value?.warning) setError(value.warning); }
         }).catch(reason => { if (current && expectedRevision === revision.current) setError(reason instanceof Error ? reason.message : "Could not load the bot connection."); });
@@ -53,6 +54,7 @@ export function DirectBotPanel() {
         finally { setBusy(false); }
     };
     const connect = async () => {
+        setForceDisconnectOwner("");
         const input = token; setToken("");
         const value = await helper().connectDirectBot(userId, input);
         remember(userId, value);
@@ -63,12 +65,20 @@ export function DirectBotPanel() {
             showToast(`Connected to ${value.botName}. Send a test DM to verify delivery.`, "success");
         }
     };
-    const disconnect = async () => {
-        const result = await helper().disconnectDirectBot(userId);
+    const disconnect = async (force = false) => {
+        if (force && (forceDisconnectOwner !== userId || UserStore.getCurrentUser()?.id !== userId)) return;
+        const result = await helper().disconnectDirectBot(userId, force);
+        if (result?.disconnected === false) {
+            if (UserStore.getCurrentUser()?.id === userId) {
+                setError(result.warning ?? "Pending test messages must finish cleanup before disconnect.");
+                setForceDisconnectOwner(userId);
+            }
+            return;
+        }
         remember(userId, null);
         updateAccountNotificationSettings(settings.store, userId, { botNotificationsEnabled: false });
         if (UserStore.getCurrentUser()?.id === userId) {
-            setBot(null); setToken("");
+            setBot(null); setToken(""); setForceDisconnectOwner("");
             if (result?.warning) setError(result.warning);
         }
     };
@@ -86,7 +96,8 @@ export function DirectBotPanel() {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <Button disabled={busy || !userId || !token.trim()} onClick={() => run(connect)}>{busy ? "Working…" : bot ? "Replace bot" : "Connect bot"}</Button>
             <Button disabled={busy || !bot || !values.botNotificationsEnabled} onClick={() => run(sendTestDM)}>Send Test DM</Button>
-            <Button disabled={busy || !userId || !canDisconnect} onClick={() => run(disconnect)}>Disconnect</Button>
+            <Button disabled={busy || !userId || !canDisconnect} onClick={() => run(() => disconnect())}>Disconnect</Button>
+            {forceDisconnectOwner === userId && userId && <Button disabled={busy} onClick={() => run(() => disconnect(true))}>Force disconnect — test DMs may remain</Button>}
             {/secure credential storage is corrupted/i.test(error) && <Button disabled={busy || !userId} onClick={() => void run(async () => {
                 await helper().recoverDirectBotVault(userId); remember(userId, null);
                 if (UserStore.getCurrentUser()?.id === userId) { setBot(null); setError("Secure storage recovered. Reconnect your bot."); }
@@ -95,6 +106,6 @@ export function DirectBotPanel() {
         {error && <div role="alert">{error}</div>}
         <div role="status" aria-live="polite">{values.botNotificationsEnabled ? status.message : "DM notifications disabled"} • {status.pending} pending locally</div>
         {status.unsaved > 0 && <div role="alert">{status.unsaved} claim notification(s) could not be saved.</div>}
-        <div style={{ fontSize: 13 }}>The token is encrypted locally and is never displayed again or included in settings exports. Test DMs are deleted after 30 seconds, including after restart with the same valid bot connected. Disconnect removes the token; pending test cleanup may then require manual deletion.</div>
+        <div style={{ fontSize: 13 }}>The token is encrypted locally and is never displayed again or included in settings exports. Test DMs are deleted after their full 30-second lifetime, including after restart with the same valid bot connected. Disconnect keeps the connection while test cleanup is pending. Explicit force disconnect removes the token and may leave these tests in Discord.</div>
     </div>;
 }
