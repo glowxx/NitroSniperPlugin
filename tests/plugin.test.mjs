@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import { loadTS } from './helpers.mjs';
 const user = '123456789012345678';
 const code = 'abcdefghijklmnop';
-const settle = async () => { for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve)); };
+const settle = () => waitForConfirmedNotifications();
 globalThis.nsPlugin = {};
 const context = globalThis.nsPlugin;
-const { default: plugin } = await loadTS('index.tsx', {
+const { default: plugin, waitForConfirmedNotifications } = await loadTS('index.tsx', {
     '@utils/Logger': 'export class Logger { log(){} error(){} }',
     '@utils/types': 'export default x => x;',
     '@webpack': 'export function findByPropsLazy(){return {redeemGiftCode: o => new Promise((resolve,reject)=>globalThis.nsPlugin.calls.push({...o,resolve,reject}))}}',
-    '@webpack/common': 'export const ChannelStore={getChannel:()=>undefined}; export const UserStore={getCurrentUser:()=>({id:globalThis.nsPlugin.user})}; export const showToast=message=>globalThis.nsPlugin.toasts.push(message); export const Toasts={Type:{FAILURE:1}};',
+    '@webpack/common': 'export const ChannelStore={getChannel:()=>undefined}; export const UserStore={getCurrentUser:()=>({id:globalThis.nsPlugin.user})}; export const showToast=message=>globalThis.nsPlugin.toasts.push(message);',
     './settings': 'export const settings = {store:{webhookUrl:"", botNotificationsEnabled:true,botServiceUrl:"",botNotificationKey:"",ignoreOwnGiftLinks:true}};',
     './giftCode': 'export async function resolveGiftType(){return "Nitro"}',
     './notifications': 'export const captureNotificationConfig=()=>null; export const digest=async()=>"a".repeat(64); export async function enqueueNotification(e){if(globalThis.nsPlugin.savePromise)await globalThis.nsPlugin.savePromise;if(globalThis.nsPlugin.failSave)throw new Error("outbox full");globalThis.nsPlugin.events.push(e)} export async function startNotifications(){} export function stopNotifications(){}',
@@ -73,7 +73,7 @@ test('a notification failure from a stopped session cannot show a stale alert', 
     context.savePromise = new Promise((resolve, reject) => { rejectSave = reject; });
     try {
         plugin.flux.MESSAGE_CREATE({ message: message('discord.gift/stalealertABCDEF') });
-        context.calls[0].onRedeemed(); await settle();
+        context.calls[0].onRedeemed();
         plugin.stop(); rejectSave(new Error('disk write failed')); await settle();
         assert.equal(context.toasts.length, 0);
     } finally { plugin.stop(); }

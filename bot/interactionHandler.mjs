@@ -44,15 +44,15 @@ export function createInteractionHandler({ service, publicUrl, isStopping = () =
                 } finally { account.linking = false; account.controller = undefined; }
             } else if (action === 'disconnect') {
                 service.disconnect(userId);
-                await interaction.editReply('Disconnected. Your key is revoked and queued notifications are cancelled. A DM already sent to Discord cannot be recalled.');
+                await interaction.editReply('Disconnected. Your key is revoked and queued notifications are cancelled. Pending test DMs still expire; claim DMs remain permanent.');
             } else if (action === 'status') {
                 const status = service.status(userId);
-                await interaction.editReply(`Connection: **${status.linked ? 'Linked' : 'Not linked'}**\nQueued: **${status.pending}**\nLatest delivery: **${status.latest?.state ?? 'None'}**${status.latest?.error ? `\n${status.latest.error}` : ''}`);
+                await interaction.editReply(`Connection: **${status.linked ? 'Linked' : 'Not linked'}**\nQueued: **${status.pending}**\nLatest delivery: **${status.latest?.state ?? 'None'}**${status.latest?.error ? `\n${status.latest.error}` : ''}\nPending test cleanup: **${status.cleanup.pending}**${status.cleanup.error ? `\n${status.cleanup.error}` : ''}`);
             } else if (action === 'test') {
                 if (now() < account.nextAt) return void await interaction.editReply('Please wait 10 seconds before linking or testing again.');
                 account.nextAt = now() + 10_000;
                 service.enqueueForUser({ eventId: randomUUID(), kind: 'test', discordUserId: userId, occurredAt: new Date(now()).toISOString() });
-                await interaction.editReply('Test DM queued. Use /notifications status to check delivery.');
+                await interaction.editReply('Test DM queued; it will be deleted 30 seconds after delivery. Use /notifications status to check delivery.');
             }
         } catch (error) {
             const message = [50007, 50278].includes(Number(error?.code))

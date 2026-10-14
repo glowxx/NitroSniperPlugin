@@ -8,6 +8,7 @@ https://github.com/neoarz/NitroSniper
 
 import type { IpcMainInvokeEvent } from "electron";
 
+import { directBot } from "./directBot";
 import { parseDiscordWebhook, parseServiceUrl } from "./notificationProtocol";
 import type { GiftCodeResolution, NativeWebhookResponse } from "./types";
 
@@ -88,14 +89,17 @@ export async function sendBotNotification(_: IpcMainInvokeEvent, serviceUrl: str
 }
 
 export async function connectDirectBot(_: IpcMainInvokeEvent, userId: string, token: string) {
-    return (await import("./directBot")).directBot.connect(userId, token);
+    return directBot.connect(userId, token);
 }
 export async function getDirectBotStatus(_: IpcMainInvokeEvent, userId: string) {
-    return (await import("./directBot")).directBot.status(userId);
+    return directBot.status(userId);
 }
 export async function disconnectDirectBot(_: IpcMainInvokeEvent, userId: string) {
-    return (await import("./directBot")).directBot.disconnect(userId);
+    return directBot.disconnect(userId);
+}
+export async function recoverDirectBotVault(_: IpcMainInvokeEvent, userId: string) {
+    return directBot.recover(userId);
 }
 export async function sendDirectBotNotification(_: IpcMainInvokeEvent, userId: string, credentialId: string, payload: string) {
-    return (await import("./directBot")).directBot.send(userId, credentialId, payload);
+    return directBot.send(userId, credentialId, payload);
 }

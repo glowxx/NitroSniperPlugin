@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { loadTS } from './helpers.mjs';
 const userId = '123456789012345678';
 const event = { eventId: 'c'.repeat(64), kind: 'claimed', discordUserId: userId, occurredAt: new Date().toISOString() };
-const tick = async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setTimeout(resolve, 2)); };
+const tick = () => notifications.waitForNotificationIdle();
 globalThis.nsAuditData = { value: undefined, failRead: false, failWrite: false };
 const data = globalThis.nsAuditData;
 const notifications = await loadTS('notifications.ts', { '@api/DataStore': `
@@ -46,11 +46,12 @@ test('native helper rejection increments backoff rather than retrying every poll
     } finally { notifications.stopNotifications(); }
 });
 test('late status responses cannot update a stopped notification session', async () => {
-    setup(); let resolveStatus;
+    setup(); let resolveStatus, entered;
+    const inStatus = new Promise(resolve => { entered = resolve; });
     try {
         await notifications.startNotifications(() => config); await tick();
-        globalThis.VencordNative.pluginHelpers.NitroSniper.sendBotNotification = () => new Promise(resolve => { resolveStatus = resolve; });
-        const check = notifications.checkBotConnection(); await tick(); notifications.stopNotifications();
+        globalThis.VencordNative.pluginHelpers.NitroSniper.sendBotNotification = () => { entered(); return new Promise(resolve => { resolveStatus = resolve; }); };
+        const check = notifications.checkBotConnection(); await inStatus; notifications.stopNotifications();
         resolveStatus({ status: 200, data: '{"pending":0,"latest":{"state":"delivered"}}' });
         await assert.rejects(check, /stopped|changed|disabled/);
         assert.doesNotMatch(notifications.getNotificationStatus().message, /last DM: delivered/);
@@ -138,16 +139,17 @@ for (const reply of ['<html>Not Found</html>', 'Not Found', '', '{"error":"Unkno
 test('metadata finishing during transport cannot lose the acceptance or cause resubmission', async t => {
     setup(); let now = Date.now();
     t.mock.method(Date, 'now', () => now);
-    let poll, finishMetadata, accept;
+    let poll, finishMetadata, accept, entered;
+    const inTransport = new Promise(resolve => { entered = resolve; });
     t.mock.method(globalThis, 'setInterval', callback => { poll = callback; return 987654; });
     globalThis.VencordNative.pluginHelpers.NitroSniper.sendBotNotification = async (...args) => {
-        sends.push(args); return await new Promise(resolve => { accept = resolve; });
+        sends.push(args); entered(); return await new Promise(resolve => { accept = resolve; });
     };
     try {
         await notifications.startNotifications(() => config); await tick();
         const enqueue = notifications.enqueueNotification(event, notifications.captureNotificationConfig(), new Promise(resolve => { finishMetadata = resolve; }));
         await tick(); assert.equal(data.value.length, 1);
-        now += 3001; poll(); await tick(); assert.equal(sends.length, 1);
+        now += 3001; poll(); await inTransport; assert.equal(sends.length, 1);
         finishMetadata('Nitro'); await enqueue;
         accept({ status: 202, data: '{"accepted":true}' }); await tick();
         assert.equal(data.value.length, 0);

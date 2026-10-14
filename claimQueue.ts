@@ -1,11 +1,27 @@
 import type { ClaimRequest } from "./types";
 
 export function extractGiftCodes(content: string): string[] {
-    // Match wrappers in place: stripping Markdown first could turn an attacker's URL path into a gift URL.
-    const pattern = /(?:^|[\s<(])([*_~|`]*)(?:https?:\/\/)?(?:discord\.gift\/|discord(?:app)?\.com\/gifts?\/)([A-Za-z0-9]{16,24})([*_~|`]*)(?=$|[\s<>()[\]{}.,!?"'`#])/g;
-    return [...new Set(Array.from(content.matchAll(pattern))
-        .filter(match => match[1] === Array.from(match[3]).reverse().join(""))
-        .map(match => match[2]))];
+    const codes = new Set<string>();
+    // Keep a complete whitespace-delimited candidate, including any nested URL in its path/query.
+    // U+FEFF is JavaScript whitespace but an invisible URL modification, not a candidate boundary.
+    for (const token of content.match(/(?:\S|\uFEFF)+/g) ?? []) {
+        let candidate = token.replace(/[.,!?]+$/, "");
+        // Strip only paired OUTER formatting; never search inside an unrelated URL or malformed wrapper.
+        const closing: Record<string, string> = { "(": ")", "[": "]", "{": "}", "<": ">", '"': '"', "'": "'", "*": "*", "_": "_", "~": "~", "|": "|", "`": "`" };
+        while (candidate.length > 1 && closing[candidate[0]] === candidate.at(-1)) candidate = candidate.slice(1, -1);
+        // Validate the raw spelling before URL normalization (userinfo, Unicode, backslashes, dot segments).
+        if (/[^\x21-\x7e]/.test(candidate)) continue;
+        const match = /^(https?:\/\/)?(discord\.gift|discord(?:app)?\.com)(\/[^?#]*)(?:\?[^#]*)?(?:#.*)?$/i.exec(candidate);
+        if (!match) continue;
+        const path = match[2].toLowerCase() === "discord.gift" ? /^\/([A-Za-z0-9]{16,24})$/ : /^\/gifts?\/([A-Za-z0-9]{16,24})$/;
+        const code = path.exec(match[3])?.[1];
+        if (!code) continue;
+        try {
+            const url = new URL(match[1] ? candidate : `https://${candidate}`);
+            if (url.hostname.toLowerCase() === match[2].toLowerCase() && url.pathname === match[3] && !url.username && !url.password) codes.add(code);
+        } catch { /* Invalid complete URL. */ }
+    }
+    return [...codes];
 }
 
 interface SeenClaim { time: number; attempts: number; retryAt?: number; }
@@ -37,6 +53,8 @@ export class ClaimQueue {
     private active = false;
     private generation = 0;
     private dispatched?: DispatchedClaim;
+    private cooldowns = new Map<string, number>();
+    private wakeup?: ReturnType<typeof setTimeout>;
 
     constructor(
         private redeem: (request: ClaimRequest, success: () => void, failure: (error: unknown) => void) => PromiseLike<unknown> | void,
@@ -63,11 +81,15 @@ export class ClaimQueue {
         }
         this.pending = [];
         clearTimeout(this.dispatched?.timer);
+        clearTimeout(this.wakeup);
+        this.wakeup = undefined;
         // Keep the lock until the old action really returns, even across account/plugin restarts.
     }
     enqueue(request: ClaimRequest): boolean {
         if (!this.active || this.pending.length >= 100) return false;
         const now = Date.now();
+        for (const [account, deadline] of this.cooldowns) if (deadline <= now) this.cooldowns.delete(account);
+        if (this.cooldowns.size >= 5000 && !this.cooldowns.has(request.claimantId ?? "")) return false;
         const protectedKeys = new Set(this.pending.map(item => this.identity(item)));
         if (this.dispatched) protectedKeys.add(this.identity(this.dispatched.request));
         for (const [key, entry] of this.seen) if (now - entry.time > 86_400_000 && !protectedKeys.has(key)) this.seen.delete(key);
@@ -91,8 +113,22 @@ export class ClaimQueue {
     }
     private next() {
         if (!this.active || this.dispatched) return;
-        const request = this.pending.shift();
+        clearTimeout(this.wakeup);
+        this.wakeup = undefined;
+        const [request] = this.pending;
         if (!request) return;
+        const delay = (this.cooldowns.get(request.claimantId ?? "") ?? 0) - Date.now();
+        if (delay > 0) {
+            const { generation } = this;
+            const timer = setTimeout(() => {
+                if (this.wakeup !== timer || !this.active || generation !== this.generation || this.pending[0] !== request) return;
+                this.wakeup = undefined;
+                this.next();
+            }, delay);
+            this.wakeup = timer;
+            return;
+        }
+        this.pending.shift();
         const entry = this.seen.get(this.identity(request))!;
         entry.attempts++;
         entry.retryAt = undefined;
@@ -103,9 +139,15 @@ export class ClaimQueue {
             if (this.dispatched !== claim) return;
             clearTimeout(claim.timer);
             this.dispatched = undefined;
+            const delay = success ? undefined : retryDelay(error);
+            // BillingError retains status/retryAfter, but no trustworthy bucket/scope headers.
+            // A late result still applies to the account that dispatched it, even after stop/switch.
+            if (delay !== undefined && (error as { status?: unknown; })?.status === 429) {
+                const account = request.claimantId ?? "";
+                this.cooldowns.set(account, Math.max(this.cooldowns.get(account) ?? 0, Date.now() + delay));
+            }
             try {
                 if (this.active && claim.generation === this.generation) {
-                    const delay = success ? undefined : retryDelay(error);
                     if (delay !== undefined && entry.attempts < 3) entry.retryAt = Date.now() + delay;
                     this.completed(request, success, error);
                 }

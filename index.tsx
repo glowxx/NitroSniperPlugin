@@ -10,8 +10,9 @@ import { Logger } from "@utils/Logger";
 import definePlugin from "@utils/types";
 import type { Message } from "@vencord/discord-types";
 import { findByPropsLazy } from "@webpack";
-import { ChannelStore, showToast, Toasts, UserStore } from "@webpack/common";
+import { ChannelStore, showToast, UserStore } from "@webpack/common";
 
+import { accountNotificationSettings } from "./accountSettings";
 import { ClaimQueue, extractGiftCodes } from "./claimQueue";
 import { resolveGiftType } from "./giftCode";
 import { createNotification } from "./notificationProtocol";
@@ -20,6 +21,8 @@ import { settings } from "./settings";
 import type { ClaimRequest } from "./types";
 import { sendClaimWebhook } from "./webhook";
 
+export { waitForNotificationIdle } from "./notifications";
+
 const logger = new Logger("NitroSniper");
 const GiftActions = findByPropsLazy("redeemGiftCode");
 let startTime = 0;
@@ -27,6 +30,14 @@ let session = 0;
 let started = false;
 let accountId = "";
 let lastOverflowWarning = 0;
+const recordings = new Set<Promise<void>>();
+
+/** Observe already-started confirmed-event preparation without making shutdown wait. */
+export async function waitForConfirmedNotifications() {
+    // Promise-only redemption confirms in the microtask queue.
+    await Promise.resolve();
+    while (recordings.size) await Promise.allSettled([...recordings]);
+}
 
 interface MessageCreateEvent {
     message: Message & { guild_id?: string; };
@@ -45,20 +56,19 @@ async function giftTypeWithDeadline(code: string) {
 }
 
 async function notify(request: ClaimRequest, success: boolean, userId: string, generation: number) {
-    const { webhookUrl, botNotificationsEnabled: botEnabled } = settings.store;
+    const { webhookUrl, botNotificationsEnabled: botEnabled } = accountNotificationSettings(settings.store, userId);
     if (!webhookUrl.trim() && !(success && botEnabled)) return;
     const isCurrent = () => started && generation === session && UserStore.getCurrentUser()?.id === userId;
     if (!isCurrent()) return;
     const expectedConfig = captureNotificationConfig();
     const giftType = giftTypeWithDeadline(request.code);
     if (webhookUrl.trim()) void giftType.then(type => {
-        if (!isCurrent() || settings.store.webhookUrl !== webhookUrl) return;
+        if (!isCurrent() || accountNotificationSettings(settings.store, userId).webhookUrl !== webhookUrl) return;
         return sendClaimWebhook(webhookUrl, success ? "claimed" : "failed", request, type);
     }).catch(() => logger.error("Webhook notification failed. Check the webhook URL and desktop native support."));
     if (success && botEnabled) {
         const event = createNotification(request, userId, null);
         event.eventId = await digest(`${userId}:${request.code}`);
-        if (!isCurrent()) return;
         await enqueueNotification(event, expectedConfig, giftType);
     }
 }
@@ -72,14 +82,18 @@ const queue = new ClaimQueue(
         logger.log(success ? "Gift successfully redeemed" : "Gift redemption failed");
         const userId = request.claimantId;
         const generation = session;
-        if (userId) void notify(request, success, userId, generation).catch(() => {
-            logger.error("Could not save DM notification. Check the notification settings and outbox.");
-            if (started && generation === session && UserStore.getCurrentUser()?.id === userId) {
-                showToast("NitroSniper could not save a DM notification. Check the notification panel and connection settings.", Toasts.Type.FAILURE);
-            }
-        });
+        if (userId) {
+            const recording = notify(request, success, userId, generation).catch(() => {
+                logger.error("Could not save DM notification. Check the notification settings and outbox.");
+                if (started && generation === session && UserStore.getCurrentUser()?.id === userId) {
+                    showToast("NitroSniper could not save a DM notification. Check the notification panel and connection settings.", "failure");
+                }
+            });
+            recordings.add(recording);
+            void recording.finally(() => recordings.delete(recording));
+        }
     },
-    () => showToast("NitroSniper is still waiting for Discord. Check for an open gift or CAPTCHA dialog. If Discord never responds, fully restart the client.", Toasts.Type.FAILURE)
+    () => showToast("NitroSniper is still waiting for Discord. Check for an open gift or CAPTCHA dialog. If Discord never responds, fully restart the client.", "failure")
 );
 
 function directCredentialId(userId: string): string {
@@ -88,19 +102,19 @@ function directCredentialId(userId: string): string {
 }
 
 function startSession() {
-    // Preserve an existing service setup on the first update; fresh installations use token setup.
-    if (settings.store.botNotificationMode === "direct" && !settings.store.botDirectAccounts
-        && settings.store.botServiceUrl.trim() && settings.store.botNotificationKey.trim()) settings.store.botNotificationMode = "service";
     started = true;
     session++;
     accountId = UserStore.getCurrentUser()?.id ?? "";
+    accountNotificationSettings(settings.store, accountId);
     startTime = Date.now();
     queue.start();
-    void startNotifications(() => ({ enabled: settings.store.botNotificationsEnabled,
-        mode: settings.store.botNotificationMode === "direct" ? "direct" : "service",
-        url: settings.store.botNotificationMode === "direct" ? "https://discord.com" : settings.store.botServiceUrl,
-        key: settings.store.botNotificationMode === "direct" ? directCredentialId(UserStore.getCurrentUser()?.id ?? "") : settings.store.botNotificationKey,
-        userId: UserStore.getCurrentUser()?.id ?? "" }))
+    void startNotifications(() => {
+        const userId = UserStore.getCurrentUser()?.id ?? "";
+        const value = accountNotificationSettings(settings.store, userId);
+        return { enabled: value.botNotificationsEnabled, mode: value.botNotificationMode,
+            url: value.botNotificationMode === "direct" ? "https://discord.com" : value.botServiceUrl,
+            key: value.botNotificationMode === "direct" ? directCredentialId(userId) : value.botNotificationKey, userId };
+    })
         .catch(() => logger.error("Could not load the DM notification outbox."));
 }
 
@@ -140,7 +154,7 @@ export default definePlugin({
                 const avatar = message.author?.avatar;
                 if (queue.pendingCount >= 100 && Date.now() - lastOverflowWarning > 10_000) {
                     lastOverflowWarning = Date.now();
-                    showToast("NitroSniper claim queue is full. Check the open Discord gift dialog.", Toasts.Type.FAILURE);
+                    showToast("NitroSniper claim queue is full. Check the open Discord gift dialog.", "failure");
                 }
                 queue.enqueue({ code, claimantId: accountId, authorId, authorName: message.author?.globalName ?? message.author?.username,
                     authorUsername: message.author?.username,
@@ -148,6 +162,7 @@ export default definePlugin({
                     channelId: message.channel_id, guildId: ChannelStore.getChannel(message.channel_id)?.guild_id, messageId: message.id });
             }
         },
+        CONNECTION_OPEN() { if (started && accountId !== UserStore.getCurrentUser()?.id) startSession(); },
         LOGOUT() { accountId = ""; session++; queue.stop(); stopNotifications(); }
     }
 });

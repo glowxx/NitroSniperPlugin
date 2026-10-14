@@ -24,10 +24,10 @@ test('token setup → confirmed claim → durable client outbox → native Disco
     globalThis.nsDirect.settings = { ignoreOwnGiftLinks: false, webhookUrl: '', botNotificationsEnabled: true,
         botNotificationMode: 'direct', botDirectAccounts: JSON.stringify({ [userId]: connection }), botServiceUrl: '', botNotificationKey: '' };
     globalThis.VencordNative = { pluginHelpers: { NitroSniper: Object.fromEntries(Object.entries(native).filter(([,fn]) => typeof fn === 'function').map(([key,fn]) => [key, (...args) => fn(null,...args)])) } };
-    const { default: plugin } = await loadTS('index.tsx', {
+    const { default: plugin, waitForConfirmedNotifications, waitForNotificationIdle } = await loadTS('index.tsx', {
         '@utils/Logger': 'export class Logger{log(){} error(){}}', '@utils/types': 'export default x=>x;',
         '@webpack': 'export function findByPropsLazy(){return {redeemGiftCode:o=>{globalThis.nsDirect.calls.push(o)}}}',
-        '@webpack/common': 'export const ChannelStore={getChannel:()=>undefined}; export const UserStore={getCurrentUser:()=>({id:globalThis.nsDirect.userId})}; export const showToast=()=>{}; export const Toasts={Type:{FAILURE:1}};',
+        '@webpack/common': 'export const ChannelStore={getChannel:()=>undefined}; export const UserStore={getCurrentUser:()=>({id:globalThis.nsDirect.userId})}; export const showToast=()=>{};',
         '@api/DataStore': 'export async function get(k){return structuredClone(globalThis.nsDirect.store.get(k))} export async function set(k,v){globalThis.nsDirect.store.set(k,structuredClone(v))}',
         './settings': 'export const settings={store:globalThis.nsDirect.settings};', './giftCode': 'export async function resolveGiftType(){return "Nitro Monthly";}'
     });
@@ -36,7 +36,8 @@ test('token setup → confirmed claim → durable client outbox → native Disco
         plugin.flux.MESSAGE_CREATE({ message: { content: 'https://discord.gift/abcdefghijklmnop', timestamp: new Date(Date.now()+1).toISOString(), author: { id: '234567890123456789' }, channel_id: '345678901234567890', id: '456789012345678901' } });
         assert.equal(calls.length, 1, 'Setup verifies the bot, but does not claim success or send a message');
         globalThis.nsDirect.calls[0].onRedeemed();
-        for (let i=0;i<100 && calls.length<3;i++) await new Promise(resolve => setTimeout(resolve,5));
+        await waitForConfirmedNotifications();
+        await waitForNotificationIdle();
         assert.equal(calls.length, 3);
         assert.deepEqual(JSON.parse(calls[1][1].body), { recipient_id: userId });
         const message = JSON.parse(calls[2][1].body);
@@ -45,7 +46,7 @@ test('token setup → confirmed claim → durable client outbox → native Disco
         assert.equal(JSON.stringify(message).includes('abcdefghijklmnop'), false);
         assert.equal(JSON.stringify(globalThis.nsDirect.settings).includes(token), false);
         assert.equal((await readFile(join(dir,'NitroSniper','bot-credentials.json'),'utf8')).includes(token), false);
-        for (let i=0;i<100 && globalThis.nsDirect.store.get('NitroSniper.notificationOutbox.v1')?.length;i++) await new Promise(resolve => setTimeout(resolve,5));
+        await waitForNotificationIdle();
         assert.deepEqual(globalThis.nsDirect.store.get('NitroSniper.notificationOutbox.v1'), []);
         await native.disconnectDirectBot(null,userId);
         assert.equal(await native.getDirectBotStatus(null,userId), null);

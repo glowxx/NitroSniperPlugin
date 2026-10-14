@@ -1,9 +1,10 @@
 import type { PluginNative } from "@utils/types";
-import { Button, Toasts, UserStore, showToast, useEffect, useState, useStateFromStores, useRef } from "@webpack/common";
+import { Button, showToast, useEffect, useRef, UserStore, useState, useStateFromStores } from "@webpack/common";
 
+import { accountNotificationSettings, updateAccountNotificationSettings } from "./accountSettings";
+import type { BotConnection } from "./directBot";
 import { getNotificationStatus, sendTestDM, subscribeNotifications } from "./notifications";
 import { settings } from "./settings";
-import type { BotConnection } from "./directBot";
 
 function helper() {
     const value = (globalThis as any).VencordNative?.pluginHelpers?.NitroSniper as PluginNative<typeof import("./native")> | undefined;
@@ -28,14 +29,19 @@ export function DirectBotPanel() {
     const [busy, setBusy] = useState(false);
     const [status, setStatus] = useState(getNotificationStatus);
     const [error, setError] = useState("");
-    const values = settings.use(["botNotificationsEnabled", "botDirectAccounts"]);
+    settings.use(["notificationAccounts", "botDirectAccounts"]);
+    const values = accountNotificationSettings(settings.store, userId);
+    let savedConnection = false;
+    try { savedConnection = !!JSON.parse(settings.store.botDirectAccounts || "{}")[userId]?.credentialId; }
+    catch { /* Native storage remains authoritative; unreadable public metadata contains no token. */ }
+    const canDisconnect = !!bot || savedConnection || /secure token storage is unavailable/i.test(error);
     useEffect(() => subscribeNotifications(() => setStatus(getNotificationStatus())), []);
     useEffect(() => {
         let current = true;
         const expectedRevision = ++revision.current;
         setToken(""); setBot(null); setError("");
         if (userId) void Promise.resolve().then(() => helper().getDirectBotStatus(userId)).then(value => {
-            if (current && expectedRevision === revision.current) { setBot(value); remember(userId, value); }
+            if (current && expectedRevision === revision.current) { setBot(value); remember(userId, value); if (value?.warning) setError(value.warning); }
         }).catch(reason => { if (current && expectedRevision === revision.current) setError(reason instanceof Error ? reason.message : "Could not load the bot connection."); });
         return () => { current = false; };
     }, [userId]);
@@ -50,15 +56,21 @@ export function DirectBotPanel() {
         const input = token; setToken("");
         const value = await helper().connectDirectBot(userId, input);
         remember(userId, value);
+        updateAccountNotificationSettings(settings.store, userId, { botNotificationsEnabled: true });
         if (UserStore.getCurrentUser()?.id === userId) {
-            setBot(value); settings.store.botNotificationsEnabled = true;
-            showToast(`Connected to ${value.botName}. Send a test DM to verify delivery.`, Toasts.Type.SUCCESS);
+            setBot(value);
+            if (value.warning) setError(value.warning);
+            showToast(`Connected to ${value.botName}. Send a test DM to verify delivery.`, "success");
         }
     };
     const disconnect = async () => {
-        await helper().disconnectDirectBot(userId);
+        const result = await helper().disconnectDirectBot(userId);
         remember(userId, null);
-        if (UserStore.getCurrentUser()?.id === userId) { setBot(null); setToken(""); settings.store.botNotificationsEnabled = false; }
+        updateAccountNotificationSettings(settings.store, userId, { botNotificationsEnabled: false });
+        if (UserStore.getCurrentUser()?.id === userId) {
+            setBot(null); setToken("");
+            if (result?.warning) setError(result.warning);
+        }
     };
     return <div style={{ display: "grid", gap: 12 }}>
         <div>Paste your bot token and click Connect. The bot sends DMs directly from this desktop client. No server or slash-command setup is needed.</div>
@@ -72,13 +84,17 @@ export function DirectBotPanel() {
                 style={{ padding: 10, borderRadius: 4, border: "1px solid var(--input-border, transparent)", color: "var(--text-default, var(--text-normal))", background: "var(--input-background, var(--background-tertiary))" }} />
         </label>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <Button disabled={busy || !userId || !token.trim()} onClick={() => void run(connect)}>{busy ? "Working…" : bot ? "Replace bot" : "Connect bot"}</Button>
-            <Button disabled={busy || !bot || !values.botNotificationsEnabled} onClick={() => void run(sendTestDM)}>Send Test DM</Button>
-            <Button disabled={busy || !bot} onClick={() => void run(disconnect)}>Disconnect</Button>
+            <Button disabled={busy || !userId || !token.trim()} onClick={() => run(connect)}>{busy ? "Working…" : bot ? "Replace bot" : "Connect bot"}</Button>
+            <Button disabled={busy || !bot || !values.botNotificationsEnabled} onClick={() => run(sendTestDM)}>Send Test DM</Button>
+            <Button disabled={busy || !userId || !canDisconnect} onClick={() => run(disconnect)}>Disconnect</Button>
+            {/secure credential storage is corrupted/i.test(error) && <Button disabled={busy || !userId} onClick={() => void run(async () => {
+                await helper().recoverDirectBotVault(userId); remember(userId, null);
+                if (UserStore.getCurrentUser()?.id === userId) { setBot(null); setError("Secure storage recovered. Reconnect your bot."); }
+            })}>Recover secure storage</Button>}
         </div>
         {error && <div role="alert">{error}</div>}
         <div role="status" aria-live="polite">{values.botNotificationsEnabled ? status.message : "DM notifications disabled"} • {status.pending} pending locally</div>
         {status.unsaved > 0 && <div role="alert">{status.unsaved} claim notification(s) could not be saved.</div>}
-        <div style={{ fontSize: 13 }}>The token is encrypted locally and is never displayed again or included in settings exports. Keep Discord open for queued DMs to send. Disconnect removes the saved token.</div>
+        <div style={{ fontSize: 13 }}>The token is encrypted locally and is never displayed again or included in settings exports. Test DMs are deleted after 30 seconds, including after restart with the same valid bot connected. Disconnect removes the token; pending test cleanup may then require manual deletion.</div>
     </div>;
 }

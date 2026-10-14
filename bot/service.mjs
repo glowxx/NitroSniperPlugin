@@ -7,6 +7,8 @@ import { dirname } from 'node:path';
 const snowflake = /^\d{17,20}$/;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const DAY = 86_400_000;
+const TEST_LIFETIME = 30_000;
+const CLEANUP_LIMIT = 10_000;
 export class ServiceError extends Error {
     constructor(status, message) { super(message); this.status = status; }
 }
@@ -40,13 +42,13 @@ export function buildMessage(event) {
             color: event.kind === 'test' ? 0x5865f2 : 0x43b581, fields,
             timestamp: event.occurredAt, footer: { text: 'NitroSniper • DM notifications' } }],
         allowedMentions: { parse: [] },
-        nonce: hash(`${event.discordUserId}:${event.eventId}`).slice(0, 24),
+        nonce: hash(`${event.kind === 'test' ? 'test:' : ''}${event.discordUserId}:${event.eventId}`).slice(0, 24),
         enforceNonce: true
     };
 }
 
 export class NotificationService {
-    constructor({ database = 'bot/data/notifications.sqlite', sendDM, now = Date.now, onLeaseLost = () => {} }) {
+    constructor({ database = 'bot/data/notifications.sqlite', sendDM, deleteTestDM, botId = () => undefined, now = Date.now, onLeaseLost = () => {} }) {
         if (database !== ':memory:') mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
         this.db = new DatabaseSync(database);
         this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
@@ -58,7 +60,16 @@ export class NotificationService {
             CREATE INDEX IF NOT EXISTS delivery_due ON events(state,next_at);
             CREATE INDEX IF NOT EXISTS ingestion_recent ON events(user_id,created_at);
             CREATE INDEX IF NOT EXISTS status_latest ON events(user_id,updated_at DESC);
-            CREATE TABLE IF NOT EXISTS worker_lease(id INTEGER PRIMARY KEY CHECK(id=1),owner TEXT NOT NULL,expires_at INTEGER NOT NULL);`);
+            CREATE TABLE IF NOT EXISTS worker_lease(id INTEGER PRIMARY KEY CHECK(id=1),owner TEXT NOT NULL,expires_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS test_cleanups(user_id TEXT NOT NULL,event_id TEXT NOT NULL,bot_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,message_id TEXT NOT NULL,delete_at INTEGER NOT NULL,next_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,error TEXT,PRIMARY KEY(user_id,event_id),UNIQUE(bot_id,channel_id,message_id));
+            CREATE INDEX IF NOT EXISTS cleanup_due ON test_cleanups(next_at);
+            CREATE TABLE IF NOT EXISTS cleanup_backoff(bot_id TEXT PRIMARY KEY,next_at INTEGER NOT NULL);
+            CREATE TRIGGER IF NOT EXISTS cleanup_capacity BEFORE INSERT ON test_cleanups
+                WHEN (SELECT count(*) FROM test_cleanups)>=10000 OR
+                     (SELECT count(*) FROM test_cleanups WHERE user_id=NEW.user_id)>=100
+                BEGIN SELECT RAISE(ABORT,'Test cleanup queue is full'); END;`);
         this.owner = randomBytes(24).toString('hex');
         const acquired = this.db.prepare(`INSERT INTO worker_lease VALUES(1,?,?)
             ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at
@@ -76,10 +87,16 @@ export class NotificationService {
         }, 5000);
         this.leaseTimer.unref();
         this.sendDM = sendDM;
+        this.deleteTestDM = deleteTestDM;
+        this.botId = botId;
         this.now = now;
         this.busy = false;
         this.closed = false;
         this.lastPrune = 0;
+        // Validate persisted metadata even when a broken timestamp would never become due.
+        for (const job of this.db.prepare('SELECT rowid,* FROM test_cleanups').iterate()) {
+            if (!this.#validCleanup(job)) this.db.prepare('DELETE FROM test_cleanups WHERE rowid=?').run(job.rowid);
+        }
     }
     loseLease() {
         if (this.stopping || this.closed) return;
@@ -141,7 +158,8 @@ export class NotificationService {
         const linked = !!this.db.prepare('SELECT 1 FROM links WHERE user_id=?').get(userId);
         const pending = this.db.prepare("SELECT count(*) AS count FROM events WHERE user_id=? AND state='queued'").get(userId).count;
         const latest = this.db.prepare('SELECT state,updated_at AS updatedAt,error FROM events WHERE user_id=? ORDER BY updated_at DESC,rowid DESC LIMIT 1').get(userId) ?? null;
-        return { linked, pending, latest };
+        const cleanup = this.db.prepare('SELECT count(*) AS pending,MAX(error) AS error FROM test_cleanups WHERE user_id=?').get(userId);
+        return { linked, pending, latest, cleanup };
     }
     enqueue(body, token) {
         const event = validateEvent(body, this.now());
@@ -155,6 +173,19 @@ export class NotificationService {
         if (!this.status(event.discordUserId).linked) throw new ServiceError(403, 'Run /notifications link first.');
         const existing = this.db.prepare('SELECT state FROM events WHERE user_id=? AND event_id=?').get(event.discordUserId, event.eventId);
         if (existing) return { accepted: true, duplicate: true, state: existing.state };
+        if (event.kind === 'test') {
+            // Reserve capacity for every queued test before sending anything to Discord.
+            const capacity = this.db.prepare(`SELECT (SELECT count(*) FROM test_cleanups) +
+                (SELECT count(*) FROM events WHERE state='queued' AND json_valid(payload) AND json_extract(payload,'$.kind')='test') AS total,
+                (SELECT count(*) FROM test_cleanups WHERE user_id=?) +
+                (SELECT count(*) FROM events WHERE user_id=? AND state='queued' AND json_valid(payload) AND json_extract(payload,'$.kind')='test') AS account`).get(event.discordUserId, event.discordUserId);
+            // A revoked in-flight test can still return a successful SDK receipt.
+            const revokedDelivery = this.delivery?.test && this.db.prepare('SELECT state FROM events WHERE user_id=? AND event_id=?')
+                .get(this.delivery.userId, this.delivery.eventId)?.state !== 'queued';
+            if (capacity.total + Number(!!revokedDelivery) >= CLEANUP_LIMIT
+                || capacity.account + Number(!!revokedDelivery && this.delivery.userId === event.discordUserId) >= 100)
+                throw new ServiceError(429, 'Test cleanup queue is full. Retry after pending test messages are removed.');
+        }
         const userQueued = this.status(event.discordUserId).pending;
         const totalQueued = this.db.prepare("SELECT count(*) AS count FROM events WHERE state='queued'").get().count;
         if (userQueued >= 100 || totalQueued >= 10_000) throw new ServiceError(429, 'Notification queue is full. Retry later.');
@@ -169,6 +200,7 @@ export class NotificationService {
         if (!this.ownsLease()) { this.loseLease(); return; }
         this.busy = true;
         try {
+            if (this.deleteTestDM) await this.#cleanupDue();
             const now = this.now();
             if (now - this.lastPrune >= 60_000) {
                 this.db.prepare("UPDATE events SET state='failed',error='Delivery window expired',updated_at=? WHERE state='queued' AND json_extract(payload,'$.occurredAt')<?").run(now, new Date(now - DAY).toISOString());
@@ -190,11 +222,14 @@ export class NotificationService {
                 if (!canSend()) continue;
                 let state = 'delivered', error = null, nextAt = now;
                 const controller = new AbortController();
-                this.delivery = { userId: row.user_id, controller };
+                this.delivery = { userId: row.user_id, eventId: row.event_id, test: payload.kind === 'test', controller };
                 const deadline = setTimeout(() => controller.abort(), Math.max(1, DAY - (this.now() - Date.parse(payload.occurredAt))));
                 deadline.unref();
                 try {
-                    if (await this.sendDM(row.user_id, buildMessage(payload), canSend, controller.signal) === false) continue;
+                    const receipt = await this.sendDM(row.user_id, buildMessage(payload), canSend, controller.signal, payload.kind);
+                    if (receipt === false) continue;
+                    if (!this.ownsLease()) { this.loseLease(); break; }
+                    if (payload.kind === 'test') this.#recordTestDelivery(row, receipt);
                 }
                 catch (err) {
                     const permanent = [50007, 50278, 50013, 10013, 50035].includes(Number(err?.code));
@@ -218,7 +253,87 @@ export class NotificationService {
             }
         } finally { this.busy = false; }
     }
-    stop() { this.stopping = true; this.delivery?.controller.abort(); }
+    #recordTestDelivery(row, receipt) {
+        const now = this.now();
+        if (!receipt || ![receipt.channelId, receipt.messageId, receipt.botId].every(id => typeof id === 'string' && snowflake.test(id))
+            || receipt.botId !== this.botId() || !Number.isSafeInteger(receipt.createdAt)
+            || receipt.createdAt > now + 300_000 || receipt.createdAt < now - DAY) {
+            throw new Error('Discord test delivery identity unavailable.');
+        }
+        // Persist the SDK receipt and completion atomically; a replay uses the same nonce.
+        this.db.exec('BEGIN IMMEDIATE');
+        try {
+            // Never expire before thirty seconds after delivery, even when server/client clocks differ.
+            const deleteAt = Math.max(receipt.createdAt, now) + TEST_LIFETIME;
+            this.db.prepare(`INSERT INTO test_cleanups(user_id,event_id,bot_id,channel_id,message_id,delete_at,next_at)
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`).run(row.user_id, row.event_id, receipt.botId, receipt.channelId, receipt.messageId, deleteAt, deleteAt);
+            this.db.prepare("UPDATE events SET state='delivered',error=NULL,updated_at=? WHERE user_id=? AND event_id=? AND state='queued'")
+                .run(now, row.user_id, row.event_id);
+            this.db.exec('COMMIT');
+        } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    }
+    #validCleanup(job) {
+        return [job.user_id, job.bot_id, job.channel_id, job.message_id].every(id => typeof id === 'string' && snowflake.test(id)
+                && BigInt(id) <= 18_446_744_073_709_551_615n)
+            && typeof job.event_id === 'string' && /^[A-Za-z0-9_-]{16,80}$/.test(job.event_id)
+            && Number.isSafeInteger(job.delete_at) && job.delete_at >= 0 && job.delete_at <= this.now() + 330_000
+            && Number.isSafeInteger(job.next_at) && job.next_at >= 0 && job.next_at <= Math.max(job.delete_at, this.now()) + DAY
+            && Number.isSafeInteger(job.attempts) && job.attempts >= 0 && job.attempts <= 1_000_000;
+    }
+    async #cleanupDue() {
+        const jobs = this.db.prepare('SELECT rowid,* FROM test_cleanups WHERE next_at<=? ORDER BY next_at LIMIT 20').all(this.now());
+        for (const job of jobs) {
+            if (this.closed || this.stopping || !this.ownsLease()) break;
+            if (!this.#validCleanup(job)) {
+                this.db.prepare('DELETE FROM test_cleanups WHERE rowid=?').run(job.rowid);
+                continue;
+            }
+            if (job.delete_at > this.now()) {
+                this.db.prepare('UPDATE test_cleanups SET next_at=delete_at WHERE rowid=?').run(job.rowid);
+                continue;
+            }
+            if (job.bot_id !== this.botId()) {
+                this.db.prepare('UPDATE test_cleanups SET next_at=?,error=? WHERE rowid=?')
+                    .run(this.now() + 3_600_000, 'Original bot credential is unavailable. Restore the same bot to remove this test message.', job.rowid);
+                continue;
+            }
+            const backoff = this.db.prepare('SELECT next_at FROM cleanup_backoff WHERE bot_id=?').get(job.bot_id)?.next_at;
+            if (Number.isSafeInteger(backoff) && backoff > this.now()) {
+                this.db.prepare('UPDATE test_cleanups SET next_at=? WHERE rowid=?').run(Math.max(job.delete_at, backoff), job.rowid);
+                continue;
+            }
+            const controller = new AbortController();
+            this.cleanup = controller;
+            const timer = setTimeout(() => controller.abort(), 15_000);
+            timer.unref();
+            let complete = false, nextAt, error, botBackoff = false;
+            try {
+                const canDelete = () => !this.closed && !this.stopping && this.ownsLease() && job.bot_id === this.botId();
+                if (await this.deleteTestDM(job, canDelete, controller.signal) === false) continue;
+                complete = true;
+            } catch (err) {
+                const status = Number(err?.status), code = Number(err?.code);
+                complete = status === 404 || code === 10008;
+                const permanent = [400, 401, 403].includes(status) || [50001, 50013].includes(code);
+                const retryAfter = Number(err?.rawError?.retry_after ?? err?.retry_after);
+                const delay = status === 429 && Number.isFinite(retryAfter) && retryAfter > 0
+                    ? Math.max(1000, Math.ceil(Math.min(retryAfter, 86_400) * 1000))
+                    : permanent ? 3_600_000 : Math.min(300_000, 5000 * 2 ** Math.min(job.attempts, 6));
+                nextAt = this.now() + delay;
+                error = permanent ? 'Discord denied test cleanup. Restore the original bot credential and permissions.' : 'Test cleanup temporarily unavailable.';
+                botBackoff = status === 429 || permanent;
+            } finally { clearTimeout(timer); this.cleanup = undefined; }
+            if (!this.ownsLease()) { this.loseLease(); break; }
+            if (botBackoff) {
+                // One bot-wide gate survives restart and prevents a queue of failures from hammering Discord.
+                this.db.prepare('INSERT INTO cleanup_backoff VALUES(?,?) ON CONFLICT(bot_id) DO UPDATE SET next_at=excluded.next_at').run(job.bot_id, nextAt);
+            }
+            if (complete) this.db.prepare('DELETE FROM test_cleanups WHERE rowid=?').run(job.rowid);
+            else this.db.prepare('UPDATE test_cleanups SET next_at=?,attempts=MIN(attempts+1,1000000),error=? WHERE rowid=?').run(nextAt, error, job.rowid);
+        }
+        if (!this.closed && this.ownsLease()) this.db.prepare('DELETE FROM cleanup_backoff WHERE bot_id NOT IN (SELECT bot_id FROM test_cleanups)').run();
+    }
+    stop() { this.stopping = true; this.delivery?.controller.abort(); this.cleanup?.abort(); }
     close() {
         if (this.busy) throw new Error('Wait for the delivery worker before closing the database.');
         if (this.closed) return;

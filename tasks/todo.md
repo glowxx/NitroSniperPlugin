@@ -1,0 +1,10 @@
+- [x] Complete-candidate parser and account-scoped 429 backpressure, with adversarial/fake-clock regressions.
+- [x] Native vault recovery, removal without keyring, HTTP status preservation, durable direct test cleanup, with restart/security regressions.
+- [x] Durable service test cleanup with SQLite upgrade/restart regressions.
+- [x] Account notification isolation, legacy migration, session-independent confirmed persistence, supported toast calls.
+- [x] Deterministic asynchronous tests and local integration regressions.
+- [x] Pinned/current full type checks and standalone builds.
+- [x] Final security/diff review and documentation.
+- [x] Unrestricted localhost HTTP integration tests: approved final npm test passed 237/237.
+- [x] User accepted stock GPL-header lint limitation; retain MIT/original attribution and do not suppress checks.
+- [x] Save the single focused local commit after the user accepted the documented verification limitation.

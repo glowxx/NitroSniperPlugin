@@ -1,5 +1,26 @@
 # Verification
 
+## Post-audit implementation — 2026-10-14
+
+Baseline: clean `main` at `6b1caa3348ca3a43ecc954204fedfe8a439525c4`; implementation branch `fix/post-audit-hardening`. Node.js 24.19.0. All Discord responses and OS encryption in tests are simulated; no authenticated redemption, real bot credential or CAPTCHA was used.
+
+The final full suite executed **237 tests: 237 passed, none skipped** with approved execution outside the sandbox. The preceding restricted run executed 235 tests with 233 passing and two loopback failures: the HTTP contract test reports `connect EACCES 127.0.0.1`; the native HTTP integration consequently cannot enqueue its event. They were not removed, skipped or changed to hide the restriction. Temporary filesystem tests use workspace `node_modules/.test-tmp` for `TEMP`/`TMP`. `npm ci` passed with approved installation, `npm run check` and `git diff --check` passed. The unrestricted test gate is satisfied; the user explicitly accepted the stock GPL-header/MIT-plugin lint limitation while retaining MIT and original attribution.
+
+Failing-first regressions independently exposed nested URL extraction, case/query parser gaps, distinct-gift 429 dispatch, stop/logout/account-switch persistence loss, corrupt vault/removal failures, HTML HTTP status loss, cleanup-write retry storms, SDK receipt loss during shutdown, nonce reuse selecting a claim message and expiry during native serialization. Controlled promises, observable completion hooks and fake clocks replaced notification timing guesses. New tests cover independent A/B destinations, legacy migration, direct/service restart deadlines, multiple tests, permanent claims, 404/429/transient failures, malformed entries, same/different-bot replacement, revocation, lease/shutdown races, capacity, partial vault recovery, safe recovery-button scope and client/server clock offsets without early test deletion, keyring-unavailable UI removal and owner-scoped late setup/disconnect.
+
+Host sources and their declared dependencies were fetched into disposable directories. Windows sandbox restrictions prevented native junction resolution and writes outside the workspace, so source and dependency files were copied to ignored `.host-verification` directories. Full TypeScript programs used each upstream `tsconfig.json`, its installed TypeScript 6.0.3 and exact original dependency paths through a read-only compiler-host adapter; no diagnostics, files or compiler checks were filtered. Builds used the upstream standalone script with Node (equivalent to its package-manager command), with a module-resolution hook for the original locked build-tool dependency graph. No upstream source or dependency manifest was changed.
+
+| Host | Revision | Full type check | Standalone build | Relevant lint |
+| --- | --- | --- | --- | --- |
+| Pinned Vencord | `7f0c10cc29fd789f2f4828ae3dc947623e837920` | Passed | Passed | Not run |
+| Pinned Equicord | `ab9b98472acb281cc7ec4d2c7a612219993bb3cb` | Passed | Passed | Not run |
+| Current Vencord | `16ec4ea838899706019e7f472e45f055070abeb1` | Passed | Passed | Failed: upstream GPL header rule versus MIT plugin |
+| Current Equicord | `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4` | Passed | Passed | Failed: upstream GPL header rule versus MIT plugin |
+
+Import ordering, unnecessary regex escaping and touched-code destructuring were fixed. Existing MIT licensing and original attribution were retained; the GPL header rule was not suppressed. Full Equicord plugin lint also identifies an existing extra blank line in untouched `webhook.ts`. No production `Toasts.Type` remains. CI now checks pinned and rolling hosts, uses each host's declared pnpm, and allows rolling failures without silently blocking releases.
+
+Node 22 and a live authenticated desktop/keyring test were not run because those environments/credentials were unavailable. Native `testTsc` CLI attempts in flattened copied dependencies initially failed on transitive dependency versions; the final full checks above use the exact locked dependency graph. Initial standalone attempts failed on dependency resolution before the workspace preparation was corrected. See `POST_AUDIT_VERIFICATION.md` for the command/result ledger and remaining gates.
+
 ## Gift redemption compatibility — 2026-10-14
 
 Source inspection used Discord Stable build **637268**, version hash `a935e483c18dcf082c62ce19bc9e3560fce10581`, obtained from the public [app page](https://discord.com/app). These are client implementation observations, not a documented stable API contract.

@@ -12,10 +12,10 @@ test('confirmed claim → native IPC → HTTP → durable bot queue → recipien
     globalThis.nsE2E = { calls: [], store: new Map(), settings: { ignoreOwnGiftLinks: false, webhookUrl: '', botNotificationsEnabled: true,
         botServiceUrl: `http://127.0.0.1:${server.address().port}`, botNotificationKey: key }, userId };
     globalThis.VencordNative = { pluginHelpers: { NitroSniper: { sendBotNotification: (...args) => native.sendBotNotification(null, ...args) } } };
-    const { default: plugin } = await loadTS('index.tsx', {
+    const { default: plugin, waitForConfirmedNotifications, waitForNotificationIdle } = await loadTS('index.tsx', {
         '@utils/Logger': 'export class Logger{log(){} error(){}}', '@utils/types': 'export default x=>x;',
         '@webpack': 'export function findByPropsLazy(){return {redeemGiftCode:o=>{globalThis.nsE2E.calls.push(o)}}}',
-        '@webpack/common': 'export const ChannelStore={getChannel:()=>undefined}; export const UserStore={getCurrentUser:()=>({id:globalThis.nsE2E.userId})}; export const showToast=()=>{}; export const Toasts={Type:{FAILURE:1}};',
+        '@webpack/common': 'export const ChannelStore={getChannel:()=>undefined}; export const UserStore={getCurrentUser:()=>({id:globalThis.nsE2E.userId})}; export const showToast=()=>{};',
         '@api/DataStore': 'export async function get(k){return structuredClone(globalThis.nsE2E.store.get(k))} export async function set(k,v){globalThis.nsE2E.store.set(k,structuredClone(v))}',
         './settings': 'export const settings={store:globalThis.nsE2E.settings};',
         './giftCode': 'export async function resolveGiftType(){return "Nitro Monthly";}'
@@ -27,7 +27,8 @@ test('confirmed claim → native IPC → HTTP → durable bot queue → recipien
         plugin.flux.MESSAGE_CREATE({ message }); assert.equal(globalThis.nsE2E.calls.length, 1);
         assert.equal(service.status(userId).pending, 0);
         globalThis.nsE2E.calls[0].onRedeemed();
-        for (let i = 0; i < 100 && !service.status(userId).pending; i++) await new Promise(resolve => setTimeout(resolve, 5));
+        await waitForConfirmedNotifications();
+        await waitForNotificationIdle();
         assert.equal(service.status(userId).pending, 1);
         await service.deliverDue(); assert.equal(dms.length, 1); assert.equal(dms[0][0], userId);
         assert.equal(dms[0][1].embeds[0].title, 'Nitro successfully claimed');

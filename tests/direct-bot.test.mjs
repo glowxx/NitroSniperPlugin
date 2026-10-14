@@ -18,7 +18,7 @@ function fixture(request) {
         if (args[1] === '/users/@me') return { status: 200, body: { id: '456789012345678901', bot: true, username: 'MyBot' } };
         return { status: 200, body: { id: '567890123456789012' } };
     };
-    return { bot: createDirectBot(vault, send), saved, calls, failSave: () => { failSave = true; } };
+    return { bot: createDirectBot(vault, send, { cleanupStore: { load: async () => [], save: async () => {} }, autoSchedule: false }), saved, calls, failSave: () => { failSave = true; } };
 }
 test('setup validates the bot and only returns public metadata; no token readback', async () => {
     const f = fixture(); const info = await f.bot.connect(user, ` Bot ${token} `);
@@ -123,4 +123,31 @@ test('native bot HTTP transport bounds replies and never returns credential-bear
     globalThis.fetch=async()=>{throw new Error(`network error with token ${token}`);};
     const result=await bot.send(user,info.credentialId,JSON.stringify(event()));
     assert.equal(result.status,-1);assert.equal(result.data.includes(token),false);
+});
+
+test('non-JSON Discord errors preserve HTTP status and sanitized rate limiting', async t => {
+    const f = fixture();
+    const connection = await f.bot.connect(user, token);
+    for (const status of [403, 404, 429, 500]) {
+        const saved = f.saved;
+        const bot = createDirectBot({ get: async id => saved.get(id) ?? null, set: async () => {}, remove: async () => {} });
+        t.mock.method(globalThis, 'fetch', async () => new Response('<html>private response</html>', { status }));
+        const result = await bot.send(user, connection.credentialId, JSON.stringify(event()));
+        assert.equal(result.status, status);
+        assert.equal(result.data.includes('private response'), false);
+        if (status === 429) assert.equal(JSON.parse(result.data).retryAfter, 60);
+        t.mock.restoreAll();
+    }
+});
+
+test('expiry while waiting for the native mutation queue prevents final message dispatch', async () => {
+    let now = Date.now(), reads = 0, saved;
+    const calls = [];
+    const vault = { get: async () => { if (++reads === 5) now += 2; return saved ?? null; }, set: async (id, v) => { saved = v; }, remove: async () => {} };
+    const request = async (secret, path) => { calls.push(path); return path === '/users/@me'
+        ? { status: 200, body: { id: other, bot: true } } : { status: 200, body: { id: other } }; };
+    const bot = createDirectBot(vault, request, { now: () => now, autoSchedule: false, cleanupStore: { load: async () => [], save: async () => {} } });
+    const info = await bot.connect(user, token);
+    const result = await bot.send(user, info.credentialId, JSON.stringify({ ...event(), occurredAt: new Date(now - 86_399_999).toISOString() }));
+    assert.equal(result.status, 409); assert.deepEqual(calls, ['/users/@me', '/users/@me/channels']);
 });

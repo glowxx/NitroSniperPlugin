@@ -20,14 +20,24 @@ jobs:
       - run: npm test
       - run: npm run check
   host-build:
+    continue-on-error: ${{ matrix.rolling }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - repository: Vendicated/Vencord
             ref: 7f0c10cc29fd789f2f4828ae3dc947623e837920
+            rolling: false
           - repository: Equicord/Equicord
             ref: ab9b98472acb281cc7ec4d2c7a612219993bb3cb
+            rolling: false
+          - repository: Vendicated/Vencord
+            ref: main
+            rolling: true
+          - repository: Equicord/Equicord
+            ref: main
+            rolling: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -42,9 +52,9 @@ jobs:
           corepack enable
           mkdir -p client/src/userplugins/nitroSniper
           cp *.ts *.tsx client/src/userplugins/nitroSniper/
-      - run: corepack pnpm@11.9.0 install --frozen-lockfile
+      - run: corepack pnpm install --frozen-lockfile
         working-directory: client
-      - run: corepack pnpm@11.9.0 testTsc
+      - run: corepack pnpm testTsc
         working-directory: client
-      - run: corepack pnpm@11.9.0 buildStandalone
+      - run: corepack pnpm buildStandalone
         working-directory: client
