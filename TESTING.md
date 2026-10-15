@@ -1,5 +1,60 @@
 # Verification
 
+## Bounded claim diagnostics — 2026-10-15
+
+Diagnostics observe the intermittent spinner; no real stuck claim was reproduced or fixed. Claim serialization, unresolved-action locking, CAPTCHA handling, notification semantics and the two-minute warning remain unchanged. README documents the schema, fixed native path, rotation, reporting instructions and interpretation limits.
+
+- Focused diagnostics: `node --test tests/diagnostics-protocol.test.mjs tests/diagnostics-log.test.mjs tests/claim-diagnostics.test.mjs tests/renderer-diagnostics.test.mjs tests/diagnostics-integration.test.mjs`: **28/28 PASSED**. Protocol, queue and renderer tests failed before their implementations. Coverage includes callback/Promise order and outcomes, repeated/late callbacks, four bounded checkpoints with the lock retained, real IPC-to-file persistence, account sessions, visibility/focus/network transitions, normal ticks without heartbeat logs, throttled abnormal gaps, secret omission, serialized concurrent writes, rotation/restart, admission limits and I/O failure recovery.
+- Parser/claim recovery/backpressure plus notification/account/persistence regressions: **94/94 PASSED** (`parser-hardening`, `claims`, `claim-recovery`, `claim-backpressure`, `notifications`, `notification-recovery`, `account-notification-integration`, `confirmed-persistence`).
+- `npm test`: **290/290 PASSED**, none skipped, Node **24.19.0**, approved localhost access and workspace TEMP/TMP. The first full run caught a temporary-directory teardown race in `direct-dm-integration`; its fixture now drains native diagnostic writes after stopping the plugin before removing its directory. Production shutdown still does not await logging.
+- A later run concurrent with host builds hit two unchanged direct-cleanup filesystem regressions, including Windows `EPERM` on atomic rename. The unchanged cleanup file passed **28/28** in isolation and the final full run without concurrent builds passed **290/290**. No cleanup production code or assertions were changed in response.
+- `npm run check` and `git diff --check`: **PASSED**.
+- Vencord `16ec4ea838899706019e7f472e45f055070abeb1` and Equicord `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4`: full host typechecks **PASSED**, TypeScript **6.0.3**, zero diagnostics; standalone Vencord and Equicord desktop/Equibop builds **PASSED**, including renderer and native helper.
+
+The prior temporary dependency junctions were incomplete. Flattened copies also mixed transitive package versions. Those dependency directories were preserved separately and the ignored host copies received fresh frozen-lockfile installations with scripts disabled (pnpm 11.20.0; hosts declare 11.9.0 and 12.8.1). The existing full-program typecheck wrapper resolves Windows junction targets to real paths; it uses the unchanged host tsconfig and exact installed graph, with no filtered diagnostics, `skipLibCheck` override or source exclusions. No plugin dependency manifest/lockfile or host source/config was modified for verification.
+
+Stock host ESLint on the six affected TS/TSX files reports only the known GPL-header rule conflict with this MIT plugin and original attribution. No rule was disabled. Node 22, a live Discord client, real Nitro redemption and CAPTCHA were not tested. Final PR workflow and merge/consolidation results are reported separately after the diagnostics commit; a run with no executed job steps is not source/test evidence.
+
+## Masked gift link correction — 2026-10-15
+
+Starting at `5b3b5ac7079752e111315be712cd495f5bfdb773`, all three `[Nitro](https://discord.gift/CODE)`, `discord.com/gifts` and `discordapp.com/gifts` masked-link regressions failed with an empty result. The whitespace tokenizer also incorrectly exposed gift URLs inside a spaced visible label or malformed spaced destination. The correction keeps complete Markdown candidates together, handles balanced/escaped brackets and parentheses, ignores labels and passes only a complete absolute HTTP(S) destination through the unchanged strict host/path validation. Whole hostile outer URLs are never searched for gift substrings. Syntax references: [Discord masked links](https://support.discord.com/hc/en-us/articles/210298617-Markdown-Text-101-Chat-Formatting-Bold-Italic-Underline) and [CommonMark inline links](https://spec.commonmark.org/0.31.2/#inline-links).
+
+- `node --test tests/parser-hardening.test.mjs`: FAILED before correction (5/12), then PASSED **12/12**, including all prior adversarial cases plus three masked-host reproductions, case/query/fragment/paired wrappers, spaced/Unicode/nested/escaped labels, independent links, deduplication, hostile destinations/suffixes and malformed structure.
+- `node --test tests/claims.test.mjs tests/claim-recovery.test.mjs tests/claim-backpressure.test.mjs`: PASSED **67/67**.
+- `npm test`: PASSED **262/262**, none skipped, on Node 24.19.0 with approved localhost access and workspace TEMP/TMP.
+- `npm run check` and `git diff --check`: PASSED.
+
+No live Discord claims/CAPTCHA tests or unrelated production changes were made. The existing red Actions run had no executed steps and is not evidence of a source/test failure; no production workaround or workflow rerun was made in response. The new head's workflow state is reported separately after push.
+
+## Cleanup deadline correction — 2026-10-14
+
+The correction above `25efe176fccd43499718688673d929907f673346` preserves the authoritative local delivery deadline. Normal disconnect with pending tests retains the encrypted connection and reports a pending count; the separately warned force action removes it without issuing DELETE. Different-bot replacement no longer drains tests. A blocked normal disconnect also preserves unrelated in-flight CLAIM delivery.
+
+Final `npm test`: **254/254 passed, none skipped**, on Node 24.19.0 with approved loopback access. Focused cleanup/panel/lifecycle checks passed **64/64**. Fake-clock cases cover 10.000, 29.999 and 30.000 seconds, restart/recovery at 10/20 seconds, overdue restart, rotation, force revocation, account switch, actual plugin stop, clock rewinds/forward jumps and durable-before-success ordering. Service failure after successful POST now reports the cleanup limitation explicitly. No real thirty-second sleeps, Discord credentials, live redemption or CAPTCHA tests were used.
+
+Current Vencord `16ec4ea838899706019e7f472e45f055070abeb1` and Equicord `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4` full type checks passed with TS 6.0.3 and zero diagnostics; both standalone builds passed after the final functional change. Current-host lint for the three changed host-facing files reports only the previously accepted GPL-header/MIT-plugin conflict, three errors per host. No rule or check was suppressed; MIT and attribution remain intact. See [CLEANUP_DEADLINE_VERIFICATION.md](CLEANUP_DEADLINE_VERIFICATION.md) for commands, initial failures, review findings and wall-clock limits. Results below describe earlier phases.
+
+## Post-audit implementation — 2026-10-14
+
+Baseline: clean `main` at `6b1caa3348ca3a43ecc954204fedfe8a439525c4`; implementation branch `fix/post-audit-hardening`. Node.js 24.19.0. All Discord responses and OS encryption in tests are simulated; no authenticated redemption, real bot credential or CAPTCHA was used.
+
+The final full suite executed **237 tests: 237 passed, none skipped** with approved execution outside the sandbox. The preceding restricted run executed 235 tests with 233 passing and two loopback failures: the HTTP contract test reports `connect EACCES 127.0.0.1`; the native HTTP integration consequently cannot enqueue its event. They were not removed, skipped or changed to hide the restriction. Temporary filesystem tests use workspace `node_modules/.test-tmp` for `TEMP`/`TMP`. `npm ci` passed with approved installation, `npm run check` and `git diff --check` passed. The unrestricted test gate is satisfied; the user explicitly accepted the stock GPL-header/MIT-plugin lint limitation while retaining MIT and original attribution.
+
+Failing-first regressions independently exposed nested URL extraction, case/query parser gaps, distinct-gift 429 dispatch, stop/logout/account-switch persistence loss, corrupt vault/removal failures, HTML HTTP status loss, cleanup-write retry storms, SDK receipt loss during shutdown, nonce reuse selecting a claim message and expiry during native serialization. Controlled promises, observable completion hooks and fake clocks replaced notification timing guesses. New tests cover independent A/B destinations, legacy migration, direct/service restart deadlines, multiple tests, permanent claims, 404/429/transient failures, malformed entries, same/different-bot replacement, revocation, lease/shutdown races, capacity, partial vault recovery, safe recovery-button scope and client/server clock offsets without early test deletion, keyring-unavailable UI removal and owner-scoped late setup/disconnect.
+
+Host sources and their declared dependencies were fetched into disposable directories. Windows sandbox restrictions prevented native junction resolution and writes outside the workspace, so source and dependency files were copied to ignored `.host-verification` directories. Full TypeScript programs used each upstream `tsconfig.json`, its installed TypeScript 6.0.3 and exact original dependency paths through a read-only compiler-host adapter; no diagnostics, files or compiler checks were filtered. Builds used the upstream standalone script with Node (equivalent to its package-manager command), with a module-resolution hook for the original locked build-tool dependency graph. No upstream source or dependency manifest was changed.
+
+| Host | Revision | Full type check | Standalone build | Relevant lint |
+| --- | --- | --- | --- | --- |
+| Pinned Vencord | `7f0c10cc29fd789f2f4828ae3dc947623e837920` | Passed | Passed | Not run |
+| Pinned Equicord | `ab9b98472acb281cc7ec4d2c7a612219993bb3cb` | Passed | Passed | Not run |
+| Current Vencord | `16ec4ea838899706019e7f472e45f055070abeb1` | Passed | Passed | Failed: upstream GPL header rule versus MIT plugin |
+| Current Equicord | `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4` | Passed | Passed | Failed: upstream GPL header rule versus MIT plugin |
+
+Import ordering, unnecessary regex escaping and touched-code destructuring were fixed. Existing MIT licensing and original attribution were retained; the GPL header rule was not suppressed. Full Equicord plugin lint also identifies an existing extra blank line in untouched `webhook.ts`. No production `Toasts.Type` remains. CI now checks pinned and rolling hosts, uses each host's declared pnpm, and allows rolling failures without silently blocking releases.
+
+Node 22 and a live authenticated desktop/keyring test were not run because those environments/credentials were unavailable. Native `testTsc` CLI attempts in flattened copied dependencies initially failed on transitive dependency versions; the final full checks above use the exact locked dependency graph. Initial standalone attempts failed on dependency resolution before the workspace preparation was corrected. See `POST_AUDIT_VERIFICATION.md` for the command/result ledger and remaining gates.
+
 ## Gift redemption compatibility — 2026-10-14
 
 Source inspection used Discord Stable build **637268**, version hash `a935e483c18dcf082c62ce19bc9e3560fce10581`, obtained from the public [app page](https://discord.com/app). These are client implementation observations, not a documented stable API contract.

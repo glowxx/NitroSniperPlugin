@@ -2,12 +2,14 @@ import { Client, GatewayIntentBits } from 'discord.js';
 import { config } from './config.mjs';
 import { createInteractionHandler } from './interactionHandler.mjs';
 import { NotificationService, createApi } from './service.mjs';
-import { createDMSender } from './sendDM.mjs';
+import { createDMSender, createTestDMDeleter } from './sendDM.mjs';
 
 const options = config();
 const client = new Client({ intents: [GatewayIntentBits.Guilds], rest: { timeout: 10_000, retries: 2 } });
 let stopping = false;
-const service = new NotificationService({ database: options.database, onLeaseLost: () => { console.error("Database ownership lost; stopping the bot."); void shutdown(1); }, sendDM: createDMSender(client) });
+const service = new NotificationService({ database: options.database,
+    onLeaseLost: () => { console.error("Database ownership lost; stopping the bot."); void shutdown(1); },
+    sendDM: createDMSender(client), deleteTestDM: createTestDMDeleter(client), botId: () => client.user?.id });
 const server = createApi(service, { ready: () => !stopping && !service.stopping && client.isReady() });
 const commands = createInteractionHandler({ service, publicUrl: options.publicUrl, isStopping: () => stopping || service.stopping, log: console.error });
 const onInteraction = interaction => void commands.handle(interaction).catch(() => console.error('Notification command failed.'));

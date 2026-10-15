@@ -26,3 +26,5 @@ pnpm-debug.log*
 # Private notification service state
 bot/data/
 coverage/
+.test-tmp/
+.host-verification/

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { loadTS } from './helpers.mjs';
 const userId = '123456789012345678';
 const event = { eventId: 'a'.repeat(64), kind: 'claimed', discordUserId: userId, occurredAt: new Date().toISOString() };
-const wait = async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setTimeout(resolve, 2)); };
+const wait = () => notifications.waitForNotificationIdle();
 const stored = new Map();
 globalThis.nsStore = stored;
 const notifications = await loadTS('notifications.ts', { '@api/DataStore': `export async function get(k){return structuredClone(globalThis.nsStore.get(k));} export async function set(k,v){globalThis.nsStore.set(k,structuredClone(v));}` });

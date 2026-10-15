@@ -21,6 +21,7 @@ let loadError: Error | undefined;
 let epoch = 0;
 let timer: ReturnType<typeof setInterval> | undefined;
 let busy = false;
+let flushing: Promise<void> | undefined;
 let operations: Promise<unknown> = Promise.resolve();
 const serial = <T,>(fn: () => Promise<T>): Promise<T> => {
     const next = operations.then(fn);
@@ -76,7 +77,7 @@ async function connection(value = config()): Promise<Connection> {
     if (!/^\d{17,20}$/.test(value.userId)) throw new Error("Sign in to Discord first.");
     return { ...value, url, key: value.key.trim(), scope: await digest(`${value.mode === "direct" ? "direct:" : ""}${url}:${value.key.trim()}:${value.userId}`) };
 }
-function responseBody(data: string): { accepted?: boolean; state?: string; pending?: number; error?: string; retryAfter?: number; latest?: { state?: string; error?: string; }; } {
+function responseBody(data: string): { accepted?: boolean; state?: string; pending?: number; error?: string; retryAfter?: number; latest?: { state?: string; error?: string; }; cleanup?: { pending?: number; error?: string; }; } {
     try {
         const value = JSON.parse(data);
         return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -108,6 +109,12 @@ async function commit(next: Pending[]) {
     await DataStore.set(STORE_KEY, next);
     queue = next;
 }
+async function loadOutbox() {
+    const stored = await DataStore.get<Pending[]>(STORE_KEY);
+    if (stored !== undefined && (!Array.isArray(stored) || stored.length > 100)) throw new Error("Saved DM outbox is invalid. Notifications are paused; recover the client DataStore before restarting.");
+    queue = (stored ?? []).map(item => restoreStored(item, Date.now())).filter((item): item is Pending => item !== null);
+    loaded = true;
+}
 export async function startNotifications(getConfig: () => NotificationConfig) {
     stopNotifications();
     config = getConfig;
@@ -119,12 +126,8 @@ export async function startNotifications(getConfig: () => NotificationConfig) {
     const generation = epoch;
     try {
         await serial(async () => {
-            const stored = await DataStore.get<Pending[]>(STORE_KEY);
-            if (!sameSession(generation)) return;
-            if (stored !== undefined && (!Array.isArray(stored) || stored.length > 100)) throw new Error("Saved DM outbox is invalid. Notifications are paused; recover the client DataStore before restarting.");
-            queue = (stored ?? []).map(item => restoreStored(item, Date.now())).filter((item): item is Pending => item !== null);
-            loaded = true;
-            update("Ready to connect");
+            await loadOutbox();
+            if (sameSession(generation)) update("Ready to connect");
         });
     } catch (error) {
         if (sameSession(generation)) {
@@ -144,22 +147,24 @@ export function stopNotifications() {
 }
 export async function enqueueNotification(event: NotificationEvent, expectedConfig?: NotificationConfig | null, giftType?: Promise<string | null>) {
     if (loadError) throw loadError;
-    if (!active || !config().enabled) return;
+    // A confirmed event carrying its captured configuration is independent of UI/session lifetime.
+    const captured = expectedConfig ?? (active && config ? { ...config() } : null);
+    if (!captured?.enabled) return;
     const generation = epoch;
     let saved: Pending | undefined;
     let savedConnection: Connection | undefined;
     await serial(async () => {
         if (loadError) throw loadError;
-        if (!loaded) throw new Error("DM outbox has not loaded. Notifications are paused.");
-        const value = await connection(expectedConfig ?? config());
-        if (!sameSession(generation, value) || event.discordUserId !== value.userId) return;
-        scope = value.scope;
+        if (!loaded) await loadOutbox();
+        const value = await connection(captured);
+        if (event.discordUserId !== value.userId) return;
+        if (sameSession(generation, value)) scope = value.scope;
         try {
             const clean = cleanEvent(event);
             const remaining = queue.filter(item => Date.now() - Date.parse(item.event.occurredAt) < DAY);
-            if (remaining.some(item => item.scope === scope && item.event.eventId === event.eventId)) return;
+            if (remaining.some(item => item.scope === value.scope && item.event.eventId === event.eventId)) return;
             if (remaining.length >= 100) throw new Error("DM outbox is full. Check the bot connection.");
-            const item = { event: clean, scope, attempts: 0, nextAt: Date.now() + (giftType ? 3000 : 0) };
+            const item = { event: clean, scope: value.scope, attempts: 0, nextAt: Date.now() + (giftType ? 3000 : 0) };
             await commit([...remaining, item]);
             saved = item;
             savedConnection = value;
@@ -186,7 +191,18 @@ export async function enqueueNotification(event: NotificationEvent, expectedConf
     }
     if (sameSession(generation)) void flush();
 }
-async function flush() {
+function flush(): Promise<void> {
+    if (flushing) return flushing;
+    flushing = flushOnce().finally(() => { flushing = undefined; });
+    return flushing;
+}
+/** Await the current delivery/persistence work; useful for shutdown observers and deterministic checks. */
+export async function waitForNotificationIdle() {
+    await operations;
+    if (flushing) await flushing;
+    await operations;
+}
+async function flushOnce() {
     if (!active || !loaded || loadError || busy) return;
     busy = true;
     const generation = epoch;
@@ -247,7 +263,7 @@ export async function checkBotConnection() {
     if (!sameSession(generation, value)) throw new Error("Notification settings changed or the session stopped.");
     if (status !== 200) throw new Error(responseError(body.error, "Could not reach notification bot."));
     scope = value.scope;
-    update(responseError(body.latest?.error, `Connected • ${Number.isInteger(body.pending) ? body.pending : "unknown"} queued on bot • last DM: ${typeof body.latest?.state === "string" ? body.latest.state.slice(0, 30) : "none"}`));
+    update(responseError(body.cleanup?.error, responseError(body.latest?.error, `Connected • ${Number.isInteger(body.pending) ? body.pending : "unknown"} queued on bot • last DM: ${typeof body.latest?.state === "string" ? body.latest.state.slice(0, 30) : "none"}`)));
 }
 export async function sendTestDM() {
     const { generation, value } = await actionConnection();

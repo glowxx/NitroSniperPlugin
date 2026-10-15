@@ -25,12 +25,10 @@ test('a full outbox preserves saved events and exposes a sticky count of unsaved
         await notifications.checkBotConnection();
         assert.equal(notifications.getNotificationStatus().unsaved, 1);
         poll();
-        await new Promise(resolve => setImmediate(resolve));
+        await notifications.waitForNotificationIdle();
         config.key = '';
-        for (let i = 0; i < 100 && notifications.getNotificationStatus().unsaved !== 0; i++) {
-            poll();
-            await new Promise(resolve => setTimeout(resolve, 2));
-        }
+        poll();
+        await notifications.waitForNotificationIdle();
         assert.equal(notifications.getNotificationStatus().unsaved, 0, 'invalid replacement settings must not display old failures');
         config.key = 'R'.repeat(43);
         await notifications.checkBotConnection();
@@ -57,7 +55,7 @@ test('optional metadata write failure does not report a durable claim notificati
         assert.equal(notifications.getNotificationStatus().unsaved, 0);
         now += 3001;
         poll();
-        for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+        await notifications.waitForNotificationIdle();
         assert.equal(sent.length, 1);
         assert.equal(sent[0].giftType, undefined);
         assert.equal(globalThis.nsEnrichmentStore.value.length, 0);
