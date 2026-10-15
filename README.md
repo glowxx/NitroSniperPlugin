@@ -125,6 +125,20 @@ Corrupted credential storage requires an explicit **Recover secure storage** act
 - Delivery is at least once. Stable Discord message nonces reduce duplicates if a process crashes after sending but before marking an event delivered; Discord's nonce window is limited, so an unusually delayed retry can still duplicate a DM.
 - Success is the client's reported result. A recipient's key holder can submit events for their own account; the service cannot independently prove a gift redemption. It cannot send to another account through that key.
 
+## Claim diagnostics
+
+Desktop builds keep local JSON Lines at `<Discord/Electron userData>/NitroSniper/logs/claim-diagnostics.jsonl`. Rebuild and fully restart the client to include the native writer. The current file and `.1` / `.2` retain at most 512 KiB each (1.5 MiB total file contents). Rotation removes the oldest file. Logs survive client restarts; claim state does not. There is no telemetry or connectivity probe.
+
+Each entry has `ts`, `level`, `event`, a fresh anonymous `session` UUID and, for a gift, a local numeric `claim` identifier. The logger records queue transitions, callback/Promise outcomes and four pending checkpoints at 15/30/60/120 seconds. Where available, entries include visibility, focus, online state, queue size, elapsed time and cooldown. Account changes start a new anonymous session; late claim results retain their original correlation. No Discord account IDs are written.
+
+Visibility, focus and online/offline events log only actual transitions. A five-second internal timer normally writes nothing; an interval longer than 20 seconds records `runtime_gap`, at most once per minute. A gap can also reflect sleep, event-loop blockage or a wall-clock correction: it suggests suspension/throttling rather than proving its cause. No gap event does not prove uninterrupted execution. The diagnostics do not fix the intermittent spinner, bypass CAPTCHA or release an unresolved claim; the existing two-minute warning and serialized claim lock remain.
+
+Ordinary events coalesce identical entries for ten seconds and are capped at 120 per minute in both layers. Terminal callback/Promise/completion signals bypass this limit. Native writes are serialized, bounded to 512 pending records with 128 places reserved from ordinary admissions, and accept only small schema-validated records. Logging is best effort: disk errors or hard saturation can lose evidence, and shutdown never waits for the writer. Logging failures do not fail or retry a claim.
+
+Gift codes/URLs, bot/account tokens, webhook URLs, service keys, message/DM contents, authorization/cookies and CAPTCHA/rqtoken/rqdata values are intentionally omitted. Arbitrary error messages, names, stacks and bodies are discarded; only recognized error names/transport codes and bounded numeric HTTP status, Discord error code and retry delay survive validation in both layers.
+
+When reporting a stuck claim, provide the relevant `claim-diagnostics.jsonl`, `.1` and `.2` if needed, plus the approximate time, client build and whether the computer slept or the app was in the background. Review the files before sharing. Send only diagnostics files, never credential, settings, vault or notification database files. A dispatched claim followed by a long gap suggests renderer interruption; pending checkpoints without callback/Promise settlement suggest an unresolved Discord operation; rejection/error events show observable failure; a resolved Promise without a callback shows the Promise fallback completed it.
+
 ## Tests
 
 ```sh

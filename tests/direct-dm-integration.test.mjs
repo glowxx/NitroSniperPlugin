@@ -23,7 +23,12 @@ test('token setup → confirmed claim → durable client outbox → native Disco
     const connection = await native.connectDirectBot(null, userId, token);
     globalThis.nsDirect.settings = { ignoreOwnGiftLinks: false, webhookUrl: '', botNotificationsEnabled: true,
         botNotificationMode: 'direct', botDirectAccounts: JSON.stringify({ [userId]: connection }), botServiceUrl: '', botNotificationKey: '' };
-    globalThis.VencordNative = { pluginHelpers: { NitroSniper: Object.fromEntries(Object.entries(native).filter(([,fn]) => typeof fn === 'function').map(([key,fn]) => [key, (...args) => fn(null,...args)])) } };
+    const diagnosticWrites = [];
+    globalThis.VencordNative = { pluginHelpers: { NitroSniper: Object.fromEntries(Object.entries(native).filter(([,fn]) => typeof fn === 'function').map(([key,fn]) => [key, (...args) => {
+        const result = fn(null,...args);
+        if (key === 'writeClaimDiagnostic') diagnosticWrites.push(result);
+        return result;
+    }])) } };
     const { default: plugin, waitForConfirmedNotifications, waitForNotificationIdle } = await loadTS('index.tsx', {
         '@utils/Logger': 'export class Logger{log(){} error(){}}', '@utils/types': 'export default x=>x;',
         '@webpack': 'export function findByPropsLazy(){return {redeemGiftCode:o=>{globalThis.nsDirect.calls.push(o)}}}',
@@ -50,5 +55,5 @@ test('token setup → confirmed claim → durable client outbox → native Disco
         assert.deepEqual(globalThis.nsDirect.store.get('NitroSniper.notificationOutbox.v1'), []);
         await native.disconnectDirectBot(null,userId);
         assert.equal(await native.getDirectBotStatus(null,userId), null);
-    } finally { plugin.stop(); await rm(dir,{recursive:true,force:true}); delete globalThis.nsDirect; delete globalThis.VencordNative; }
+    } finally { plugin.stop(); await Promise.all(diagnosticWrites); await rm(dir,{recursive:true,force:true}); delete globalThis.nsDirect; delete globalThis.VencordNative; }
 });

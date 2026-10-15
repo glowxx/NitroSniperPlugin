@@ -1,3 +1,4 @@
+import { type DiagnosticContext, diagnosticError, type DiagnosticEvent, type DiagnosticFields, type DiagnosticObserver } from "./diagnosticProtocol";
 import type { ClaimRequest } from "./types";
 
 function closingBracket(text: string, start: number, open: string, close: string): number {
@@ -82,6 +83,8 @@ interface DispatchedClaim {
     generation: number;
     dispatchedAt: number;
     timer?: ReturnType<typeof setTimeout>;
+    checkpoints?: ReturnType<typeof setTimeout>[];
+    reported?: Set<number>;
 }
 
 /** Serial claims. Stopping cannot cancel a gift action already dispatched to Discord. */
@@ -93,15 +96,36 @@ export class ClaimQueue {
     private dispatched?: DispatchedClaim;
     private cooldowns = new Map<string, number>();
     private wakeup?: ReturnType<typeof setTimeout>;
+    private diagnosticIds = new WeakMap<ClaimRequest, DiagnosticContext>();
+    private diagnosticCounter = 0;
+    private cooldownWait?: { request: ClaimRequest; deadline: number; };
+    private lastOverflowLog = -Infinity;
 
     constructor(
         private redeem: (request: ClaimRequest, success: () => void, failure: (error: unknown) => void) => PromiseLike<unknown> | void,
         private completed: (request: ClaimRequest, success: boolean, error?: unknown) => void,
         private stalled: () => void,
-        private timeoutMs = 120_000
+        private timeoutMs = 120_000,
+        private diagnostics?: DiagnosticObserver
     ) { }
 
     private identity(request: ClaimRequest) { return `${request.claimantId ?? ""}:${request.code}`; }
+    private log(event: DiagnosticEvent, request?: ClaimRequest, fields: DiagnosticFields = {}) {
+        try {
+            if (!this.diagnostics) return;
+            if (request && !this.diagnosticIds.has(request)) this.diagnosticIds.set(request, { ...this.diagnostics.context(), claim: ++this.diagnosticCounter });
+            this.diagnostics.record(event, { pending: this.pending.length, active: !!this.dispatched, ...fields }, request ? this.diagnosticIds.get(request) : undefined);
+        } catch { /* Diagnostics must never change redemption behavior. */ }
+    }
+    private reject(request: ClaimRequest, reason: string): false {
+        this.log("claim_rejected_from_queue", request, { reason }); return false;
+    }
+    get diagnosticState(): { context?: DiagnosticContext; fields: DiagnosticFields; } {
+        const claim = this.dispatched;
+        return { context: claim ? this.diagnosticIds.get(claim.request) : undefined,
+            fields: { active: !!claim, pending: this.pending.length,
+                ...(claim ? { elapsedMs: Math.max(0, Date.now() - claim.dispatchedAt), cooldownMs: Math.max(0, (this.cooldowns.get(claim.request.claimantId ?? "") ?? 0) - Date.now()) } : {}) } };
+    }
     get pendingCount() { return this.pending.length; }
     start() {
         this.stop();
@@ -119,32 +143,52 @@ export class ClaimQueue {
         }
         this.pending = [];
         clearTimeout(this.dispatched?.timer);
+        this.dispatched?.checkpoints?.forEach(clearTimeout);
         clearTimeout(this.wakeup);
         this.wakeup = undefined;
+        this.cooldownWait = undefined;
         // Keep the lock until the old action really returns, even across account/plugin restarts.
     }
     enqueue(request: ClaimRequest): boolean {
-        if (!this.active || this.pending.length >= 100) return false;
+        this.log("gift_detected", request);
+        if (!this.active) return this.reject(request, "inactive");
+        if (this.pending.length >= 100) {
+            if (Date.now() - this.lastOverflowLog >= 10_000) { this.lastOverflowLog = Date.now(); this.log("queue_overflow", request); }
+            return this.reject(request, "queue_full");
+        }
         const now = Date.now();
         for (const [account, deadline] of this.cooldowns) if (deadline <= now) this.cooldowns.delete(account);
-        if (this.cooldowns.size >= 5000 && !this.cooldowns.has(request.claimantId ?? "")) return false;
+        if (this.cooldowns.size >= 5000 && !this.cooldowns.has(request.claimantId ?? "")) return this.reject(request, "cooldown_capacity");
         const protectedKeys = new Set(this.pending.map(item => this.identity(item)));
         if (this.dispatched) protectedKeys.add(this.identity(this.dispatched.request));
         for (const [key, entry] of this.seen) if (now - entry.time > 86_400_000 && !protectedKeys.has(key)) this.seen.delete(key);
         const key = this.identity(request);
         const previous = this.seen.get(key);
-        if (previous && (protectedKeys.has(key) || previous.retryAt === undefined || now < previous.retryAt || previous.attempts >= 3)) return false;
+        if (previous && (protectedKeys.has(key) || previous.retryAt === undefined || now < previous.retryAt || previous.attempts >= 3)) {
+            return this.reject(request, protectedKeys.has(key) ? "duplicate" : previous.retryAt === undefined ? "already_seen" : now < previous.retryAt ? "retry_wait" : "attempt_limit");
+        }
         if (!previous && this.seen.size >= 5000) {
             const oldest = Array.from(this.seen.keys()).find(item => !protectedKeys.has(item));
             if (oldest) this.seen.delete(oldest);
         }
         if (!previous) this.seen.set(key, { time: now, attempts: 0 });
         this.pending.push(request);
+        this.log("claim_enqueued", request);
         this.next();
         return true;
     }
     private armWarning(claim: DispatchedClaim) {
         clearTimeout(claim.timer);
+        claim.checkpoints?.forEach(clearTimeout);
+        if (this.diagnostics) {
+            claim.reported ??= new Set();
+            claim.checkpoints = [15_000, 30_000, 60_000, 120_000].filter(ms => !claim.reported?.has(ms)).map(checkpointMs => setTimeout(() => {
+                if (!this.active || this.dispatched !== claim) return;
+                claim.reported?.add(checkpointMs);
+                this.log("claim_pending_checkpoint", claim.request, { checkpointMs, elapsedMs: Math.max(0, Date.now() - claim.dispatchedAt),
+                    cooldownMs: Math.max(0, (this.cooldowns.get(claim.request.claimantId ?? "") ?? 0) - Date.now()) });
+            }, Math.max(1, checkpointMs - (Date.now() - claim.dispatchedAt))));
+        }
         claim.timer = setTimeout(() => {
             if (this.active && this.dispatched === claim) this.stalled();
         }, Math.max(1, this.timeoutMs - (Date.now() - claim.dispatchedAt)));
@@ -157,6 +201,11 @@ export class ClaimQueue {
         if (!request) return;
         const delay = (this.cooldowns.get(request.claimantId ?? "") ?? 0) - Date.now();
         if (delay > 0) {
+            const deadline = Date.now() + delay;
+            if (this.cooldownWait?.request !== request || this.cooldownWait.deadline !== deadline) {
+                this.cooldownWait = { request, deadline };
+                this.log("queue_waiting_for_429_cooldown", request, { cooldownMs: delay });
+            }
             const { generation } = this;
             const timer = setTimeout(() => {
                 if (this.wakeup !== timer || !this.active || generation !== this.generation || this.pending[0] !== request) return;
@@ -166,6 +215,7 @@ export class ClaimQueue {
             this.wakeup = timer;
             return;
         }
+        if (this.cooldownWait) { this.log("cooldown_finished", this.cooldownWait.request); this.cooldownWait = undefined; }
         this.pending.shift();
         const entry = this.seen.get(this.identity(request))!;
         entry.attempts++;
@@ -173,9 +223,11 @@ export class ClaimQueue {
         entry.time = Date.now();
         const claim: DispatchedClaim = { request, generation: this.generation, dispatchedAt: Date.now() };
         this.dispatched = claim;
+        this.log("claim_dispatched", request);
         const finish = (success: boolean, error?: unknown) => {
             if (this.dispatched !== claim) return;
             clearTimeout(claim.timer);
+            claim.checkpoints?.forEach(clearTimeout);
             this.dispatched = undefined;
             const delay = success ? undefined : retryDelay(error);
             // BillingError retains status/retryAfter, but no trustworthy bucket/scope headers.
@@ -184,6 +236,8 @@ export class ClaimQueue {
                 const account = request.claimantId ?? "";
                 this.cooldowns.set(account, Math.max(this.cooldowns.get(account) ?? 0, Date.now() + delay));
             }
+            this.log(success ? "claim_completed_success" : "claim_completed_failure", request,
+                { elapsedMs: Math.max(0, Date.now() - claim.dispatchedAt), late: !this.active || claim.generation !== this.generation, ...(success ? {} : diagnosticError(error)) });
             try {
                 if (this.active && claim.generation === this.generation) {
                     if (delay !== undefined && entry.attempts < 3) entry.retryAt = Date.now() + delay;
@@ -192,12 +246,18 @@ export class ClaimQueue {
             } finally { this.next(); }
         };
         this.armWarning(claim);
+        const signals = new Set<DiagnosticEvent>();
+        const signal = (event: DiagnosticEvent, error?: unknown) => {
+            if (signals.has(event)) return;
+            signals.add(event);
+            this.log(event, request, { late: this.dispatched !== claim, elapsedMs: Math.max(0, Date.now() - claim.dispatchedAt), ...diagnosticError(error) });
+        };
         try {
-            const result = this.redeem(request, () => finish(true), error => finish(false, error));
+            const result = this.redeem(request, () => { signal("on_redeemed"); finish(true); }, error => { signal("on_error", error); finish(false, error); });
             // Callback-only adapters must keep the lock; Discord's Promise resolves after redemption succeeds.
             if (result && typeof result.then === "function") {
-                void Promise.resolve(result).then(() => finish(true), error => finish(false, error));
+                void Promise.resolve(result).then(() => { signal("redeem_promise_resolved"); finish(true); }, error => { signal("redeem_promise_rejected", error); finish(false, error); });
             }
-        } catch (error) { finish(false, error); }
+        } catch (error) { signal("redeem_threw", error); finish(false, error); }
     }
 }

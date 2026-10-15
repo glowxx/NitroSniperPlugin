@@ -8,9 +8,16 @@ https://github.com/neoarz/NitroSniper
 
 import type { IpcMainInvokeEvent } from "electron";
 
+import { diagnosticsLog } from "./diagnosticsLog";
 import { directBot } from "./directBot";
 import { parseDiscordWebhook, parseServiceUrl } from "./notificationProtocol";
 import type { GiftCodeResolution, NativeWebhookResponse } from "./types";
+
+/** The native layer owns the fixed path, schema validation, queue and retention limits. */
+export async function writeClaimDiagnostic(_: IpcMainInvokeEvent, payload: string): Promise<boolean> {
+    try { return await diagnosticsLog.append(payload); }
+    catch { return false; }
+}
 
 async function request(url: URL, method: string, payload?: string, key?: string, timeoutMs = 10_000): Promise<NativeWebhookResponse> {
     try {

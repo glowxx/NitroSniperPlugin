@@ -13,6 +13,7 @@ import { findByPropsLazy } from "@webpack";
 import { ChannelStore, showToast, UserStore } from "@webpack/common";
 
 import { accountNotificationSettings } from "./accountSettings";
+import { claimDiagnostics } from "./claimDiagnostics";
 import { ClaimQueue, extractGiftCodes } from "./claimQueue";
 import { resolveGiftType } from "./giftCode";
 import { createNotification } from "./notificationProtocol";
@@ -93,7 +94,9 @@ const queue = new ClaimQueue(
             void recording.finally(() => recordings.delete(recording));
         }
     },
-    () => showToast("NitroSniper is still waiting for Discord. Check for an open gift or CAPTCHA dialog. If Discord never responds, fully restart the client.", "failure")
+    () => showToast("NitroSniper is still waiting for Discord. Check for an open gift or CAPTCHA dialog. If Discord never responds, fully restart the client.", "failure"),
+    120_000,
+    claimDiagnostics
 );
 
 function directCredentialId(userId: string): string {
@@ -101,7 +104,8 @@ function directCredentialId(userId: string): string {
     catch { return ""; }
 }
 
-function startSession() {
+function startSession(reason: "startup" | "account_changed" | "login") {
+    claimDiagnostics.beginSession(reason);
     started = true;
     session++;
     accountId = UserStore.getCurrentUser()?.id ?? "";
@@ -125,8 +129,12 @@ export default definePlugin({
     tags: ["Chat", "Utility"],
     searchTerms: ["nitro", "gift", "redeem", "snipe", "notifications"],
     settings,
-    start: startSession,
+    start() {
+        claimDiagnostics.start(() => queue.diagnosticState);
+        startSession("startup");
+    },
     stop() {
+        claimDiagnostics.stop();
         started = false;
         session++;
         queue.stop();
@@ -140,7 +148,8 @@ export default definePlugin({
             if (optimistic || isPushNotification || Object.hasOwn(event, "sendMessageOptions")) return;
             if (channelId !== undefined && channelId !== message.channel_id) return;
             if (accountId !== UserStore.getCurrentUser()?.id) {
-                startSession();
+                claimDiagnostics.record("account_changed");
+                startSession(accountId ? "account_changed" : "login");
             }
             if (settings.store.ignoreOwnGiftLinks && message.author?.id === UserStore.getCurrentUser()?.id) return;
             const timestamp = new Date(message.timestamp).getTime();
@@ -162,7 +171,14 @@ export default definePlugin({
                     channelId: message.channel_id, guildId: ChannelStore.getChannel(message.channel_id)?.guild_id, messageId: message.id });
             }
         },
-        CONNECTION_OPEN() { if (started && accountId !== UserStore.getCurrentUser()?.id) startSession(); },
-        LOGOUT() { accountId = ""; session++; queue.stop(); stopNotifications(); }
+        CONNECTION_OPEN() {
+            if (!started) return;
+            claimDiagnostics.record("connection_open");
+            if (accountId !== UserStore.getCurrentUser()?.id) {
+                claimDiagnostics.record("account_changed");
+                startSession(accountId ? "account_changed" : "login");
+            }
+        },
+        LOGOUT() { claimDiagnostics.record("logout"); accountId = ""; session++; queue.stop(); stopNotifications(); }
     }
 });
